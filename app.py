@@ -5,11 +5,10 @@ import os
 import sys
 import time
 import urllib.request
-import smtplib
+import urllib.error
 import random
 import hashlib
 import sqlite3
-from email.message import EmailMessage
 from datetime import datetime
 from pathlib import Path
 from google import genai
@@ -210,7 +209,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# SISTEMA DE CUENTAS Y VERIFICACIÓN POR GMAIL
+# SISTEMA DE CUENTAS Y VERIFICACIÓN POR GMAIL (API DE BREVO)
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect("usuarios.db")
@@ -262,29 +261,42 @@ def verificar_login(email: str, password: str) -> bool:
     return valido
 
 def enviar_codigo_gmail(destinatario: str, codigo: str):
-    if "EMAIL_REMITENTE" not in st.secrets or "EMAIL_PASSWORD" not in st.secrets:
-        raise Exception("Falta configurar EMAIL_REMITENTE y EMAIL_PASSWORD en los Secrets de Streamlit.")
+    if "EMAIL_REMITENTE" not in st.secrets or "BREVO_API_KEY" not in st.secrets:
+        raise Exception("Falta configurar EMAIL_REMITENTE y BREVO_API_KEY en los Secrets.")
 
     remitente = st.secrets["EMAIL_REMITENTE"].strip()
-    password = st.secrets["EMAIL_PASSWORD"].replace(" ", "").strip()
+    api_key = st.secrets["BREVO_API_KEY"].strip()
 
-    msg = EmailMessage()
-    msg["Subject"] = "⚡ Tu código de verificación - Mi Clipper IA Studio"
-    msg["From"] = remitente
-    msg["To"] = destinatario
-    msg.set_content(
-        f"Hola,\n\nTu código de verificación para crear tu cuenta en Mi Clipper IA Studio es:\n\n"
-        f"    {codigo}\n\n"
-        f"Ingrésalo en la web para activar tu cuenta.\n"
-        f"Si no solicitaste este código, ignora este correo."
+    payload = json.dumps({
+        "sender": {"name": "Mi Clipper IA Studio", "email": remitente},
+        "to": [{"email": destinatario}],
+        "subject": "⚡ Tu código de verificación - Mi Clipper IA Studio",
+        "textContent": (
+            f"Hola,\n\nTu código de verificación para crear tu cuenta en Mi Clipper IA Studio es:\n\n"
+            f"    {codigo}\n\n"
+            f"Ingrésalo en la web para activar tu cuenta.\n"
+            f"Si no solicitaste este código, ignora este correo."
+        )
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=payload,
+        headers={
+            "accept": "application/json",
+            "api-key": api_key,
+            "content-type": "application/json"
+        },
+        method="POST"
     )
 
-    with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as smtp:
-        smtp.ehlo()
-        smtp.starttls()
-        smtp.ehlo()
-        smtp.login(remitente, password)
-        smtp.send_message(msg)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if resp.status not in (200, 201, 202):
+                raise Exception(f"Brevo devolvió estado HTTP {resp.status}")
+    except urllib.error.HTTPError as e:
+        detalle = e.read().decode("utf-8", errors="ignore")
+        raise Exception(f"Error de Brevo ({e.code}): {detalle}")
 
 init_db()
 
