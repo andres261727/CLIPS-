@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import urllib.request
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from google import genai
@@ -18,8 +19,7 @@ st.set_page_config(
 )
 
 # --- SISTEMA DE ACTUALIZACIONES AUTOMÁTICAS ---
-VERSION_ACTUAL = "1.0.0"
-# Cambia TU_USUARIO por tu nombre de usuario de GitHub
+VERSION_ACTUAL = "1.1.0"
 URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
 
 def revisar_actualizacion():
@@ -64,7 +64,7 @@ revisar_actualizacion()
 if "nueva_version" in st.session_state:
     mostrar_popup_actualizacion(st.session_state["nueva_version"])
 
-# --- ESTILO VISUAL INSPIRADO EN NEXUSCLIPS (PLUS JAKARTA SANS + HORIZON GLOW) ---
+# --- ESTILO VISUAL INSPIRADO EN NEXUSCLIPS ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
@@ -152,12 +152,13 @@ st.markdown("""
 # --- RUTAS Y ARCHIVOS LOCALES ---
 WORK_DIR = Path("workspace")
 CLIPS_DIR = Path("clips_generados")
+EDITED_DIR = Path("clips_editados")
 CONFIG_FILE = Path("config_clipper.json")
 PROJECTS_FILE = Path("proyectos.json")
 WORK_DIR.mkdir(exist_ok=True)
 CLIPS_DIR.mkdir(exist_ok=True)
+EDITED_DIR.mkdir(exist_ok=True)
 
-# --- ESTILOS DE SUBTÍTULOS Y ENCUADRES ---
 ESTILOS_SUBTITULOS = {
     "Sin subtítulos": None,
     "Dinámico (Letra grande amarilla)": "FontName=Arial Black,FontSize=20,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=55",
@@ -194,7 +195,7 @@ def guardar_json(path: Path, data):
 config = cargar_json(CONFIG_FILE, {})
 proyectos = cargar_json(PROJECTS_FILE, [])
 
-# --- FUNCIONES DE VIDEO E IA ---
+# --- FUNCIONES DE VIDEO, IA Y TIKTOK ---
 
 def descargar_video(url: str, proj_id: str) -> str:
     output_path = WORK_DIR / f"video_{proj_id}.mp4"
@@ -232,6 +233,17 @@ def extraer_audio(video_path: str, proj_id: str, min_inicio: float = 0.0, min_fi
         st.error(f"Error al preparar el audio con FFmpeg:\n{resultado.stderr}")
         st.stop()
     return str(audio_path)
+
+def obtener_duracion_video(video_path: str) -> float:
+    cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", video_path
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        return round(float(res.stdout.strip()), 2)
+    except Exception:
+        return 60.0
 
 def buscar_momentos_ia(api_key: str, audio_path: str, instruccion_usuario: str, num_clips: int, duracion_objetivo: str, offset_seg: float = 0.0):
     client = genai.Client(api_key=api_key)
@@ -280,7 +292,7 @@ def buscar_momentos_ia(api_key: str, audio_path: str, instruccion_usuario: str, 
                     client.files.delete(name=audio_file.name)
                 except Exception:
                     pass
-                st.error(f"Los servidores de Gemini están saturados en este momento. Intenta de nuevo en unos segundos.\nDetalle: {e}")
+                st.error(f"Error con Gemini (intenta de nuevo en unos segundos): {e}")
                 st.stop()
 
     try:
@@ -294,6 +306,34 @@ def buscar_momentos_ia(api_key: str, audio_path: str, instruccion_usuario: str, 
             c["start"] = round(float(c["start"]) + offset_seg, 2)
             c["end"] = round(float(c["end"]) + offset_seg, 2)
     return clips
+
+def generar_titulos_tiktok_ia(api_key: str, contexto: str, tono: str):
+    client = genai.Client(api_key=api_key)
+    prompt = f"""
+    Eres un experto en crecimiento viral de TikTok.
+    Genera títulos y descripciones altamente virales para este video.
+    TEMA O CONTEXTO DEL VIDEO: "{contexto}"
+    TONO DESEADO: "{tono}"
+
+    Devuelve exclusivamente un JSON con:
+    - "titulos": lista de 5 títulos cortos con gancho fuerte (máximo 100 caracteres cada uno, con emojis estratégicos)
+    - "descripcion": una descripción atractiva con llamado a la acción (CTA) para comentarios
+    - "hashtags": cadena con 5 a 8 hashtags relevantes y de alto alcance
+    """
+    for intento in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=[prompt],
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            if "503" in str(e) and intento < 2:
+                time.sleep(4)
+            else:
+                st.error(f"Error al generar títulos con IA: {e}")
+                st.stop()
 
 def formatear_tiempo_srt(segundos: float) -> str:
     segundos = max(0.0, float(segundos))
@@ -361,21 +401,110 @@ def renderizar_clip(video_path: str, start: float, end: float, output_path: str,
         st.error(f"Error al renderizar con FFmpeg:\n{resultado.stderr}")
         st.stop()
 
+def editar_video_ffmpeg(input_path: str, output_path: str, start: float, end: float, velocidad: float, volumen: float, brillo: float, contraste: float, texto_hook: str):
+    duracion = max(0.5, end - start)
+    vf = []
+    af = []
+
+    if velocidad != 1.0:
+        vf.append(f"setpts={round(1.0 / velocidad, 4)}*PTS")
+        af.append(f"atempo={velocidad}")
+
+    if brillo != 0.0 or contraste != 1.0:
+        vf.append(f"eq=brightness={brillo}:contrast={contraste}")
+
+    if texto_hook.strip():
+        texto_limpio = texto_hook.strip().replace(":", "\\:").replace("'", "")
+        vf.append(
+            f"drawtext=text='{texto_limpio}':fontcolor=white:fontsize=46:"
+            f"box=1:boxcolor=black@0.65:boxborderw=14:x=(w-text_w)/2:y=120"
+        )
+
+    if volumen != 1.0:
+        af.append(f"volume={volumen}")
+
+    cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(duracion)]
+    if vf:
+        cmd += ["-vf", ",".join(vf)]
+    if af:
+        cmd += ["-af", ",".join(af)]
+
+    cmd += [
+        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        "-c:a", "aac", "-b:a", "128k",
+        output_path
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        st.error(f"Error al editar el video:\n{res.stderr}")
+        st.stop()
+
+def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
+    """Sube el video a la Bandeja de Entrada (Borradores) de TikTok usando Content Posting API."""
+    file_size = os.path.getsize(video_path)
+    init_url = "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/"
+    payload = json.dumps({
+        "source_info": {
+            "source": "FILE_UPLOAD",
+            "video_size": file_size,
+            "chunk_size": file_size,
+            "total_chunk_count": 1
+        }
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        init_url,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8"
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        init_data = json.loads(resp.read().decode("utf-8"))
+
+    upload_url = init_data.get("data", {}).get("upload_url")
+    if not upload_url:
+        raise Exception(f"TikTok no devolvió URL de subida: {init_data}")
+
+    with open(video_path, "rb") as f:
+        video_bytes = f.read()
+
+    put_req = urllib.request.Request(
+        upload_url,
+        data=video_bytes,
+        headers={
+            "Content-Type": "video/mp4",
+            "Content-Range": f"bytes 0-{file_size - 1}/{file_size}"
+        },
+        method="PUT"
+    )
+    with urllib.request.urlopen(put_req, timeout=120) as put_resp:
+        if put_resp.status not in (200, 201, 206):
+            raise Exception(f"Error al subir archivo a TikTok (HTTP {put_resp.status})")
+    return True
+
 # --- NAVEGACIÓN LATERAL ---
 
 with st.sidebar:
     st.markdown(f"## ⚡ Mi Clipper IA `v{VERSION_ACTUAL}`")
     pagina = st.radio(
         "Navegación",
-        ["💬 Inicio (Chat IA)", "📁 Mis Proyectos", "⚙️ Ajustes y API Key"],
+        ["💬 Inicio (Chat IA)", "✂️ Editor y TikTok", "📁 Mis Proyectos", "⚙️ Ajustes y API Key"],
         label_visibility="collapsed"
     )
 
     st.divider()
     if config.get("api_key"):
-        st.success("🔑 API Key activa y guardada")
+        st.success("🔑 Gemini API Key activa")
     else:
-        st.warning("⚠️ Falta guardar tu API Key en Ajustes")
+        st.warning("⚠️ Falta tu Gemini API Key")
+
+    if config.get("tiktok_token"):
+        st.success("🎵 TikTok conectado")
+    else:
+        st.caption("🎵 TikTok: modo manual (configura token en Ajustes)")
 
     if st.button("🔄 Buscar actualizaciones", use_container_width=True):
         st.session_state.pop("update_checked", None)
@@ -409,7 +538,6 @@ if pagina == "💬 Inicio (Chat IA)":
         st.session_state["clips_encontrados"] = p["clips"]
         st.session_state["nombre_proyecto"] = p["nombre"]
 
-    # --- PASO 1: TRAER TU VÍDEO ---
     with st.container():
         st.markdown("#### 1️⃣ Trae tu vídeo")
         tab_link, tab_file = st.tabs(["🔗 Pega un enlace (YouTube / Twitch / TikTok)", "📁 Subir un archivo desde tu PC"])
@@ -458,7 +586,6 @@ if pagina == "💬 Inicio (Chat IA)":
                 st.session_state.pop("clips_encontrados", None)
                 st.success("¡Ya lo tengo! Ahora dime qué quieres hacer con el vídeo.")
 
-    # --- PASO 2: BRIEF CONVERSACIONAL ---
     if "audio_path" in st.session_state:
         st.divider()
         st.markdown("#### 2️⃣ Dile al chat qué momentos buscar y el estilo")
@@ -490,7 +617,7 @@ if pagina == "💬 Inicio (Chat IA)":
         if st.button("🚀 Empezar — Buscar momentos con IA", type="primary", use_container_width=True):
             api_key = config.get("api_key", "")
             if not api_key:
-                st.error("Primero guarda tu Gemini API Key en la pestaña '⚙️ Ajustes y API Key' de la izquierda.")
+                st.error("Primero guarda tu Gemini API Key en '⚙️ Ajustes y API Key'.")
             else:
                 with st.spinner("Entendiendo tu vídeo y buscando los mejores momentos…"):
                     clips = buscar_momentos_ia(
@@ -517,7 +644,6 @@ if pagina == "💬 Inicio (Chat IA)":
 
                 st.success(f"¡Listo! Encontré {len(clips)} momentos listos para renderizar.")
 
-    # --- PASO 3: RESULTADOS Y RENDERIZADO ---
     if "clips_encontrados" in st.session_state:
         st.divider()
         st.markdown("#### 3️⃣ Tus clips sugeridos")
@@ -568,7 +694,7 @@ if pagina == "💬 Inicio (Chat IA)":
                             )
                             if srt_temp and os.path.exists(srt_temp):
                                 os.remove(srt_temp)
-                        st.success("¡Clip listo!")
+                        st.success("¡Clip listo! Puedes editarlo y subirlo en '✂️ Editor y TikTok'.")
 
                     if os.path.exists(out_file):
                         st.video(out_file)
@@ -583,7 +709,127 @@ if pagina == "💬 Inicio (Chat IA)":
                             )
 
 # ==============================================================================
-# PÁGINA 2: MIS PROYECTOS
+# PÁGINA 2: EDITOR DE VIDEO + GENERADOR DE TÍTULOS IA + SUBIR A TIKTOK
+# ==============================================================================
+elif pagina == "✂️ Editor y TikTok":
+    st.markdown('<div class="hero-title">Editor de Video y TikTok</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero-sub">Retoca tu clip, genera títulos virales con IA y súbelo directo a tu cuenta de TikTok.</div>', unsafe_allow_html=True)
+
+    # 1. Elegir video (de clips_generados o subir uno)
+    clips_disponibles = sorted(list(CLIPS_DIR.glob("*.mp4")) + list(EDITED_DIR.glob("*.mp4")), key=os.path.getmtime, reverse=True)
+    opciones_video = [str(p) for p in clips_disponibles]
+
+    col_sel1, col_sel2 = st.columns([2, 1])
+    video_elegido = None
+    with col_sel1:
+        if opciones_video:
+            video_elegido = st.selectbox("🎬 Elige un clip ya generado:", opciones_video, format_func=lambda x: Path(x).name)
+        else:
+            st.info("Aún no tienes clips generados. Sube un MP4 a la derecha o crea uno en Inicio.")
+    with col_sel2:
+        subido_extra = st.file_uploader("O sube otro MP4 para editar", type=["mp4", "mov"])
+        if subido_extra:
+            ruta_extra = str(WORK_DIR / f"extra_{subido_extra.name}")
+            with open(ruta_extra, "wb") as f:
+                f.write(subido_extra.read())
+            video_elegido = ruta_extra
+
+    if video_elegido and os.path.exists(video_elegido):
+        dur_total = obtener_duracion_video(video_elegido)
+        st.divider()
+
+        col_prev, col_edit = st.columns([1.1, 1.4])
+        with col_prev:
+            st.markdown("#### 📺 Vista previa")
+            video_a_mostrar = st.session_state.get("video_editado_actual", video_elegido)
+            if not os.path.exists(video_a_mostrar):
+                video_a_mostrar = video_elegido
+            st.video(video_a_mostrar)
+
+        with col_edit:
+            st.markdown("#### 🎛️ Editor rápido (antes de subir)")
+            r1, r2 = st.columns(2)
+            ed_ini = r1.number_input("Recortar inicio (seg)", min_value=0.0, max_value=dur_total, value=0.0, step=0.5)
+            ed_fin = r2.number_input("Recortar fin (seg)", min_value=0.5, max_value=dur_total, value=dur_total, step=0.5)
+
+            e1, e2, e3 = st.columns(3)
+            velocidad = e1.select_slider("Velocidad", options=[0.75, 1.0, 1.25, 1.5, 2.0], value=1.0)
+            volumen = e2.slider("Volumen", 0.0, 2.0, 1.0, 0.1)
+            contraste = e3.slider("Contraste", 0.5, 1.8, 1.0, 0.05)
+
+            brillo = st.slider("Brillo", -0.3, 0.3, 0.0, 0.02)
+            texto_hook = st.text_input("🏷️ Texto gancho arriba del video (opcional):", placeholder="Ej: ¡NO VAS A CREER EL FINAL! 😱")
+
+            if st.button("✨ Aplicar edición y generar vista previa", type="primary", use_container_width=True):
+                nombre_editado = str(EDITED_DIR / f"editado_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
+                with st.spinner("Aplicando edición con FFmpeg..."):
+                    editar_video_ffmpeg(
+                        video_elegido, nombre_editado, ed_ini, ed_fin,
+                        velocidad, volumen, brillo, contraste, texto_hook
+                    )
+                st.session_state["video_editado_actual"] = nombre_editado
+                st.success("¡Edición aplicada!")
+                st.rerun()
+
+        # --- GENERADOR DE TÍTULOS IA PARA TIKTOK ---
+        st.divider()
+        st.markdown("#### 🧠 Generador de Títulos y Hashtags para TikTok (IA)")
+        g1, g2 = st.columns([2, 1])
+        contexto_video = g1.text_input(
+            "¿De qué trata este clip?",
+            placeholder="Ej: Un truco secreto para ahorrar luz, una historia de terror en el hospital, momento gracioso en stream..."
+        )
+        tono_video = g2.selectbox("Tono viral", ["Curioso / Misterio", "Gracioso / Dinámico", "Polémico / Debate", "Educativo / Directo"])
+
+        if st.button("✨ Generar 5 títulos virales con IA", type="primary"):
+            api_key = config.get("api_key", "")
+            if not api_key:
+                st.error("Guarda tu Gemini API Key en Ajustes primero.")
+            elif not contexto_video.strip():
+                st.warning("Escribe brevemente de qué trata el video.")
+            else:
+                with st.spinner("La IA está creando títulos virales para TikTok..."):
+                    res_ia = generar_titulos_tiktok_ia(api_key, contexto_video, tono_video)
+                    st.session_state["tiktok_ia"] = res_ia
+
+        titulo_final = ""
+        if "tiktok_ia" in st.session_state:
+            datos_tk = st.session_state["tiktok_ia"]
+            titulo_elegido = st.radio("Elige tu título favorito:", datos_tk["titulos"])
+            caption_sugerido = f"{titulo_elegido}\n\n{datos_tk['descripcion']}\n\n{datos_tk['hashtags']}"
+            titulo_final = st.text_area("📝 Texto final para tu publicación de TikTok:", value=caption_sugerido, height=130)
+        else:
+            titulo_final = st.text_area("📝 Escribe o genera arriba el título para TikTok:", height=100)
+
+        # --- SUBIR A TIKTOK ---
+        st.divider()
+        st.markdown("#### 🎵 Publicar en TikTok")
+        video_final_subir = st.session_state.get("video_editado_actual", video_elegido)
+        if not os.path.exists(video_final_subir):
+            video_final_subir = video_elegido
+
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("🚀 Subir directo a mi TikTok (API)", type="primary", use_container_width=True):
+                tk_token = config.get("tiktok_token", "").strip()
+                if not tk_token:
+                    st.warning("Falta conectar tu Access Token de TikTok en '⚙️ Ajustes y API Key'. Mientras tanto, usa el botón de la derecha.")
+                else:
+                    try:
+                        with st.spinner("Subiendo video a tus borradores de TikTok..."):
+                            subir_video_tiktok_api(tk_token, video_final_subir, titulo_final)
+                        st.success("¡Video enviado a tu cuenta de TikTok! Abre la app de TikTok en tu celular y lo verás en tu Bandeja de entrada / Borradores listo para publicar.")
+                    except Exception as e:
+                        st.error(f"No se pudo subir vía API: {e}")
+
+        with b2:
+            if st.button("🌐 Abrir TikTok Studio + Carpeta del Video", use_container_width=True):
+                os.startfile(str(Path(video_final_subir).parent.resolve()))
+                webbrowser.open("https://www.tiktok.com/tiktokstudio/upload")
+                st.info("Se abrió TikTok Studio y la carpeta de tu video. Solo arrastra el archivo y pega tu título.")
+
+# ==============================================================================
+# PÁGINA 3: MIS PROYECTOS
 # ==============================================================================
 elif pagina == "📁 Mis Proyectos":
     st.markdown('<div class="hero-title">Tus Proyectos</div>', unsafe_allow_html=True)
@@ -608,10 +854,11 @@ elif pagina == "📁 Mis Proyectos":
                 st.divider()
 
 # ==============================================================================
-# PÁGINA 3: AJUSTES Y API KEY
+# PÁGINA 4: AJUSTES Y API KEY
 # ==============================================================================
 elif pagina == "⚙️ Ajustes y API Key":
     st.markdown('<div class="hero-title">Ajustes</div>', unsafe_allow_html=True)
+
     st.markdown("#### 🔑 Clave de Inteligencia Artificial (Gemini)")
     nueva_key = st.text_input(
         "Gemini API Key",
@@ -619,14 +866,25 @@ elif pagina == "⚙️ Ajustes y API Key":
         type="password",
         placeholder="Pega aquí tu clave de Google AI Studio"
     )
-    if st.button("💾 Guardar Key permanentemente", type="primary"):
+
+    st.divider()
+    st.markdown("#### 🎵 Conexión con tu cuenta de TikTok (API Oficial)")
+    st.caption("Obtén tu Access Token en developers.tiktok.com con el permiso `video.upload` (Content Posting API).")
+    nuevo_tk_token = st.text_input(
+        "TikTok Access Token",
+        value=config.get("tiktok_token", ""),
+        type="password",
+        placeholder="Pega aquí tu Access Token de TikTok..."
+    )
+
+    if st.button("💾 Guardar todas las claves permanentemente", type="primary"):
         config["api_key"] = nueva_key.strip()
+        config["tiktok_token"] = nuevo_tk_token.strip()
         guardar_json(CONFIG_FILE, config)
-        st.success("¡Guardado! Tu API Key quedará lista cada vez que abras el programa.")
+        st.success("¡Claves guardadas en tu PC!")
 
     st.divider()
     st.markdown("#### 🧹 Limpieza de archivos temporales")
-    st.caption("Los clips que generes se guardan en la carpeta `clips_generados` dentro de `generador clips`.")
     if st.button("Vaciar carpeta workspace (videos descargados)"):
         for f in WORK_DIR.glob("*"):
             try:
