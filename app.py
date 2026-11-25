@@ -265,8 +265,8 @@ def enviar_codigo_gmail(destinatario: str, codigo: str):
     if "EMAIL_REMITENTE" not in st.secrets or "EMAIL_PASSWORD" not in st.secrets:
         raise Exception("Falta configurar EMAIL_REMITENTE y EMAIL_PASSWORD en los Secrets de Streamlit.")
 
-    remitente = st.secrets["EMAIL_REMITENTE"]
-    password = st.secrets["EMAIL_PASSWORD"]
+    remitente = st.secrets["EMAIL_REMITENTE"].strip()
+    password = st.secrets["EMAIL_PASSWORD"].replace(" ", "").strip()
 
     msg = EmailMessage()
     msg["Subject"] = "⚡ Tu código de verificación - Mi Clipper IA Studio"
@@ -279,7 +279,10 @@ def enviar_codigo_gmail(destinatario: str, codigo: str):
         f"Si no solicitaste este código, ignora este correo."
     )
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.ehlo()
         smtp.login(remitente, password)
         smtp.send_message(msg)
 
