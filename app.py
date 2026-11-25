@@ -5,7 +5,11 @@ import os
 import sys
 import time
 import urllib.request
-import webbrowser
+import smtplib
+import random
+import hashlib
+import sqlite3
+from email.message import EmailMessage
 from datetime import datetime
 from pathlib import Path
 from google import genai
@@ -17,52 +21,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# --- SISTEMA DE ACTUALIZACIONES AUTOMÁTICAS ---
-VERSION_ACTUAL = "1.2.0"
-URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
-
-def revisar_actualizacion():
-    if "update_checked" in st.session_state:
-        return
-    st.session_state["update_checked"] = True
-    try:
-        req = urllib.request.Request(URL_VERSION_JSON, headers={"Cache-Control": "no-cache"})
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if data.get("version") and data["version"] != VERSION_ACTUAL:
-                st.session_state["nueva_version"] = data
-    except Exception:
-        pass
-
-@st.dialog("🚀 ¡Nueva versión disponible!")
-def mostrar_popup_actualizacion(info):
-    st.markdown(f"Tu versión actual: **`v{VERSION_ACTUAL}`** → Nueva versión: **`v{info['version']}`**")
-    if info.get("notas"):
-        st.info(f"**Novedades:** {info['notas']}")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("⬇️ Actualizar ahora", type="primary", use_container_width=True):
-            try:
-                with st.spinner("Descargando e instalando actualización..."):
-                    with urllib.request.urlopen(info["url_codigo"], timeout=10) as resp:
-                        nuevo_codigo = resp.read().decode("utf-8")
-                    Path(__file__).write_text(nuevo_codigo, encoding="utf-8")
-                st.success("¡Actualizado! Recargando programa...")
-                del st.session_state["nueva_version"]
-                time.sleep(1.5)
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo actualizar: {e}")
-    with col2:
-        if st.button("Más tarde", use_container_width=True):
-            del st.session_state["nueva_version"]
-            st.rerun()
-
-revisar_actualizacion()
-if "nueva_version" in st.session_state:
-    mostrar_popup_actualizacion(st.session_state["nueva_version"])
 
 # --- ESTILO VISUAL PREMIUM (NEXUS STUDIO VIBRANT DARK + NEON GLASS) ---
 st.markdown("""
@@ -251,15 +209,211 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- RUTAS Y ARCHIVOS LOCALES ---
-WORK_DIR = Path("workspace")
-CLIPS_DIR = Path("clips_generados")
-EDITED_DIR = Path("clips_editados")
-CONFIG_FILE = Path("config_clipper.json")
-PROJECTS_FILE = Path("proyectos.json")
-WORK_DIR.mkdir(exist_ok=True)
-CLIPS_DIR.mkdir(exist_ok=True)
-EDITED_DIR.mkdir(exist_ok=True)
+# ==============================================================================
+# SISTEMA DE CUENTAS Y VERIFICACIÓN POR GMAIL
+# ==============================================================================
+def init_db():
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            email TEXT PRIMARY KEY,
+            password TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def encriptar_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def usuario_existe(email: str) -> bool:
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM usuarios WHERE email = ?", (email,))
+    existe = c.fetchone() is not None
+    conn.close()
+    return existe
+
+def registrar_usuario(email: str, password: str) -> bool:
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    try:
+        c.execute(
+            "INSERT INTO usuarios (email, password) VALUES (?, ?)",
+            (email, encriptar_password(password))
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+def verificar_login(email: str, password: str) -> bool:
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute(
+        "SELECT 1 FROM usuarios WHERE email = ? AND password = ?",
+        (email, encriptar_password(password))
+    )
+    valido = c.fetchone() is not None
+    conn.close()
+    return valido
+
+def enviar_codigo_gmail(destinatario: str, codigo: str):
+    if "EMAIL_REMITENTE" not in st.secrets or "EMAIL_PASSWORD" not in st.secrets:
+        raise Exception("Falta configurar EMAIL_REMITENTE y EMAIL_PASSWORD en los Secrets de Streamlit.")
+
+    remitente = st.secrets["EMAIL_REMITENTE"]
+    password = st.secrets["EMAIL_PASSWORD"]
+
+    msg = EmailMessage()
+    msg["Subject"] = "⚡ Tu código de verificación - Mi Clipper IA Studio"
+    msg["From"] = remitente
+    msg["To"] = destinatario
+    msg.set_content(
+        f"Hola,\n\nTu código de verificación para crear tu cuenta en Mi Clipper IA Studio es:\n\n"
+        f"    {codigo}\n\n"
+        f"Ingrésalo en la web para activar tu cuenta.\n"
+        f"Si no solicitaste este código, ignora este correo."
+    )
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(remitente, password)
+        smtp.send_message(msg)
+
+init_db()
+
+if "autenticado" not in st.session_state:
+    st.session_state["autenticado"] = False
+if "usuario" not in st.session_state:
+    st.session_state["usuario"] = None
+
+if not st.session_state["autenticado"]:
+    _, col_centro, _ = st.columns([1, 1.6, 1])
+    with col_centro:
+        st.markdown("""
+        <div class="hero-box">
+            <div class="hero-title">⚡ Mi Clipper IA Studio</div>
+            <div class="hero-sub">Inicia sesión o crea tu cuenta con Gmail para empezar a crear clips virales.</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.container(border=True):
+            tab_login, tab_registro = st.tabs(["🔐 Iniciar Sesión", "✨ Crear Cuenta"])
+
+            with tab_login:
+                email_login = st.text_input("Correo Gmail", key="login_email", placeholder="tucorreo@gmail.com").strip().lower()
+                pass_login = st.text_input("Contraseña", type="password", key="login_pass")
+
+                if st.button("Entrar al Studio", type="primary", use_container_width=True):
+                    if verificar_login(email_login, pass_login):
+                        st.session_state["autenticado"] = True
+                        st.session_state["usuario"] = email_login
+                        st.rerun()
+                    else:
+                        st.error("Correo o contraseña incorrectos.")
+
+            with tab_registro:
+                email_reg = st.text_input("Tu correo Gmail", key="reg_email", placeholder="tucorreo@gmail.com").strip().lower()
+                pass_reg = st.text_input("Crea una contraseña (mín. 6 caracteres)", type="password", key="reg_pass")
+
+                if st.button("📩 Enviar código de verificación", type="primary", use_container_width=True):
+                    if not email_reg.endswith("@gmail.com"):
+                        st.warning("Por favor, usa un correo válido terminado en @gmail.com.")
+                    elif len(pass_reg) < 6:
+                        st.warning("La contraseña debe tener al menos 6 caracteres.")
+                    elif usuario_existe(email_reg):
+                        st.error("Este correo ya está registrado. Ve a Iniciar Sesión.")
+                    else:
+                        codigo = str(random.randint(100000, 999999))
+                        try:
+                            with st.spinner("Enviando código a tu Gmail..."):
+                                enviar_codigo_gmail(email_reg, codigo)
+                            st.session_state["codigo_enviado"] = codigo
+                            st.session_state["email_pendiente"] = email_reg
+                            st.session_state["pass_pendiente"] = pass_reg
+                            st.success("¡Código enviado! Revisa tu bandeja de entrada o la carpeta de Spam.")
+                        except Exception as e:
+                            st.error(f"Error al enviar el correo: {e}")
+
+                if "codigo_enviado" in st.session_state:
+                    st.divider()
+                    codigo_ingresado = st.text_input("Ingresa el código de 6 dígitos").strip()
+
+                    if st.button("✅ Verificar y crear cuenta", type="primary", use_container_width=True):
+                        if codigo_ingresado == st.session_state["codigo_enviado"]:
+                            if registrar_usuario(st.session_state["email_pendiente"], st.session_state["pass_pendiente"]):
+                                st.success("¡Cuenta creada con éxito! Ya puedes iniciar sesión.")
+                                for k in ("codigo_enviado", "email_pendiente", "pass_pendiente"):
+                                    st.session_state.pop(k, None)
+                            else:
+                                st.error("Ese correo ya está registrado.")
+                        else:
+                            st.error("Código incorrecto. Inténtalo de nuevo.")
+    st.stop()
+
+# ==============================================================================
+# SISTEMA DE ACTUALIZACIONES AUTOMÁTICAS
+# ==============================================================================
+VERSION_ACTUAL = "1.2.0"
+URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
+
+def revisar_actualizacion():
+    if "update_checked" in st.session_state:
+        return
+    st.session_state["update_checked"] = True
+    try:
+        req = urllib.request.Request(URL_VERSION_JSON, headers={"Cache-Control": "no-cache"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if data.get("version") and data["version"] != VERSION_ACTUAL:
+                st.session_state["nueva_version"] = data
+    except Exception:
+        pass
+
+@st.dialog("🚀 ¡Nueva versión disponible!")
+def mostrar_popup_actualizacion(info):
+    st.markdown(f"Tu versión actual: **`v{VERSION_ACTUAL}`** → Nueva versión: **`v{info['version']}`**")
+    if info.get("notas"):
+        st.info(f"**Novedades:** {info['notas']}")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("⬇️ Actualizar ahora", type="primary", use_container_width=True):
+            try:
+                with st.spinner("Descargando e instalando actualización..."):
+                    with urllib.request.urlopen(info["url_codigo"], timeout=10) as resp:
+                        nuevo_codigo = resp.read().decode("utf-8")
+                    Path(__file__).write_text(nuevo_codigo, encoding="utf-8")
+                st.success("¡Actualizado! Recargando programa...")
+                del st.session_state["nueva_version"]
+                time.sleep(1.5)
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo actualizar: {e}")
+    with col2:
+        if st.button("Más tarde", use_container_width=True):
+            del st.session_state["nueva_version"]
+            st.rerun()
+
+revisar_actualizacion()
+if "nueva_version" in st.session_state:
+    mostrar_popup_actualizacion(st.session_state["nueva_version"])
+
+# --- RUTAS Y ARCHIVOS SEPARADOS POR USUARIO ---
+USER_HASH = hashlib.md5(st.session_state["usuario"].encode()).hexdigest()[:12]
+USER_BASE = Path("user_data") / USER_HASH
+WORK_DIR = USER_BASE / "workspace"
+CLIPS_DIR = USER_BASE / "clips_generados"
+EDITED_DIR = USER_BASE / "clips_editados"
+CONFIG_FILE = USER_BASE / "config_clipper.json"
+PROJECTS_FILE = USER_BASE / "proyectos.json"
+
+WORK_DIR.mkdir(parents=True, exist_ok=True)
+CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+EDITED_DIR.mkdir(parents=True, exist_ok=True)
 
 ESTILOS_SUBTITULOS = {
     "Sin subtítulos": None,
@@ -365,17 +519,17 @@ def buscar_momentos_ia(api_key: str, audio_path: str, instruccion_usuario: str, 
     DURACIÓN OBJETIVO POR CLIP: {duracion_objetivo}
 
     REGLAS:
-    - Los cortes deben empezar y terminar en frases completas.
-    - Devuelve exclusivamente un JSON con una lista bajo la clave "clips".
-    - Cada clip debe incluir:
-      - "titulo": título/gancho corto y atractivo
-      - "gancho_visual": texto ultra corto (3 a 6 palabras en MAYÚSCULAS) para poner arriba del video y atrapar atención
-      - "start": segundo exacto de inicio en el audio (número float)
-      - "end": segundo exacto de fin en el audio (número float)
-      - "motivo": por qué este momento funciona bien
-      - "puntaje_viral": entero del 1 al 100
-      - "descripcion_redes": copy listo para TikTok/Shorts/Reels con hashtags
-      - "subtitulos": lista de frases cortas (3 a 5 palabras) dentro del clip, cada una con "start" (relativo desde 0.0), "end" (relativo) y "text".
+- Los cortes deben empezar y terminar en frases completas.
+- Devuelve exclusivamente un JSON con una lista bajo la clave "clips".
+- Cada clip debe incluir:
+  - "titulo": título/gancho corto y atractivo
+  - "gancho_visual": texto ultra corto (3 a 6 palabras en MAYÚSCULAS) para poner arriba del video y atrapar atención
+  - "start": segundo exacto de inicio en el audio (número float)
+  - "end": segundo exacto de fin en el audio (número float)
+  - "motivo": por qué este momento funciona bien
+  - "puntaje_viral": entero del 1 al 100
+  - "descripcion_redes": copy listo para TikTok/Shorts/Reels con hashtags
+  - "subtitulos": lista de frases cortas (3 a 5 palabras) dentro del clip, cada una con "start" (relativo desde 0.0), "end" (relativo) y "text".
     """
 
     response = None
@@ -411,7 +565,6 @@ def buscar_momentos_ia(api_key: str, audio_path: str, instruccion_usuario: str, 
     return clips
 
 def analizar_clip_para_tiktok_ia(api_key: str, video_path: str, tono: str, contexto_extra: str = ""):
-    """Extrae el audio del clip elegido, lo sube a Gemini y genera automáticamente el Gancho visual + 5 Títulos + Descripción + Hashtags."""
     audio_temp = extraer_audio(video_path, f"tk_{datetime.now().strftime('%H%M%S')}")
     client = genai.Client(api_key=api_key)
     audio_file = client.files.upload(file=audio_temp)
@@ -426,10 +579,10 @@ def analizar_clip_para_tiktok_ia(api_key: str, video_path: str, tono: str, conte
     CONTEXTO ADICIONAL DEL CREADOR (si hay): "{contexto_extra}"
 
     Devuelve exclusivamente un JSON con:
-    - "gancho_visual": frase explosiva de 3 a 6 palabras (en MAYÚSCULAS) para colocar en grande arriba del video durante los primeros segundos y detener el scroll.
-    - "titulos": lista de 5 títulos virales cortos para TikTok (máximo 95 caracteres cada uno, con emojis estratégicos).
-    - "descripcion": descripción corta con un llamado a la acción (CTA) que provoque comentarios.
-    - "hashtags": cadena con 5 a 8 hashtags relevantes y de alto alcance.
+- "gancho_visual": frase explosiva de 3 a 6 palabras (en MAYÚSCULAS) para colocar en grande arriba del video durante los primeros segundos y detener el scroll.
+- "titulos": lista de 5 títulos virales cortos para TikTok (máximo 95 caracteres cada uno, con emojis estratégicos).
+- "descripcion": descripción corta con un llamado a la acción (CTA) que provoque comentarios.
+- "hashtags": cadena con 5 a 8 hashtags relevantes y de alto alcance.
     """
 
     response = None
@@ -617,6 +770,11 @@ total_clips_creados = len(list(CLIPS_DIR.glob("*.mp4"))) + len(list(EDITED_DIR.g
 with st.sidebar:
     st.markdown('<div class="brand-logo">⚡ Mi Clipper IA</div>', unsafe_allow_html=True)
     st.caption(f"Studio Pro · v{VERSION_ACTUAL}")
+    st.caption(f"👤 {st.session_state['usuario']}")
+    if st.button("🚪 Cerrar sesión", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
     st.divider()
 
     pagina = st.radio(
@@ -664,7 +822,6 @@ if pagina == "💬 Inicio (Chat IA)":
     </div>
     """, unsafe_allow_html=True)
 
-    # Barra de métricas rápidas (le da forma de Studio)
     k1, k2, k3, k4 = st.columns(4)
     k1.markdown(f'<div class="stat-card"><div class="stat-num">{total_clips_creados}</div><div class="stat-label">Clips Renderizados</div></div>', unsafe_allow_html=True)
     k2.markdown(f'<div class="stat-card"><div class="stat-num">{len(proyectos)}</div><div class="stat-label">Proyectos Guardados</div></div>', unsafe_allow_html=True)
@@ -831,7 +988,7 @@ if pagina == "💬 Inicio (Chat IA)":
                         with st.spinner("Renderizando clip en HD…"):
                             srt_temp = None
                             if estilo_clip != "Sin subtítulos" and clip.get("subtitulos"):
-                                srt_temp = f"temp_sub_{i+1}.srt"
+                                srt_temp = str(WORK_DIR / f"temp_sub_{i+1}.srt")
                                 generar_srt_clip(clip["subtitulos"], srt_temp)
 
                             renderizar_clip(
@@ -890,7 +1047,6 @@ elif pagina == "✂️ Editor y TikTok":
     if video_elegido and os.path.exists(video_elegido):
         dur_total = obtener_duracion_video(video_elegido)
 
-        # --- BLOQUE 1: IA AUTOMÁTICA (ESCUCHA EL CLIP Y GENERA GANCHO + TÍTULOS) ---
         with st.container(border=True):
             st.markdown('<span class="step-pill">IA AUTOMÁTICA · GANCHO Y TÍTULOS</span>', unsafe_allow_html=True)
             st.markdown("### Que la IA escuche tu clip y cree el Gancho + Títulos")
@@ -909,7 +1065,6 @@ elif pagina == "✂️ Editor y TikTok":
                         st.session_state["hook_auto"] = res_ia.get("gancho_visual", "")
                     st.success("¡Gancho visual y títulos generados automáticamente!")
 
-        # --- BLOQUE 2: VISTA PREVIA + EDITOR DE VIDEO ---
         with st.container(border=True):
             st.markdown('<span class="step-pill">EDITOR DE VIDEO</span>', unsafe_allow_html=True)
             col_prev, col_edit = st.columns([1, 1.4])
@@ -949,7 +1104,6 @@ elif pagina == "✂️ Editor y TikTok":
                     st.success("¡Video editado con éxito!")
                     st.rerun()
 
-        # --- BLOQUE 3: TÍTULOS Y PUBLICACIÓN EN TIKTOK ---
         with st.container(border=True):
             st.markdown('<span class="step-pill">PUBLICAR EN TIKTOK</span>', unsafe_allow_html=True)
             titulo_final = ""
@@ -965,12 +1119,12 @@ elif pagina == "✂️ Editor y TikTok":
             if not os.path.exists(video_final_subir):
                 video_final_subir = video_elegido
 
-            b1, b2 = st.columns(2)
+            b1, b2, b3 = st.columns(3)
             with b1:
-                if st.button("🚀 Subir directo a mi TikTok (API)", type="primary", use_container_width=True):
+                if st.button("🚀 Subir directo a TikTok (API)", type="primary", use_container_width=True):
                     tk_token = config.get("tiktok_token", "").strip()
                     if not tk_token:
-                        st.warning("Falta tu Access Token de TikTok en Ajustes. Usa el botón de la derecha para subir por TikTok Studio.")
+                        st.warning("Falta tu Access Token de TikTok en Ajustes. Descarga el clip y súbelo en TikTok Studio.")
                     else:
                         try:
                             with st.spinner("Subiendo video a tu TikTok..."):
@@ -980,10 +1134,17 @@ elif pagina == "✂️ Editor y TikTok":
                             st.error(f"Error al subir vía API: {e}")
 
             with b2:
-                if st.button("🌐 Abrir TikTok Studio + Carpeta del Video", use_container_width=True):
-                    os.startfile(str(Path(video_final_subir).parent.resolve()))
-                    webbrowser.open("https://www.tiktok.com/tiktokstudio/upload")
-                    st.info("Se abrió TikTok Studio y la carpeta de tu video editado.")
+                with open(video_final_subir, "rb") as f:
+                    st.download_button(
+                        "⬇️ Descargar clip final",
+                        data=f,
+                        file_name=Path(video_final_subir).name,
+                        mime="video/mp4",
+                        use_container_width=True
+                    )
+
+            with b3:
+                st.link_button("🌐 Abrir TikTok Studio", "https://www.tiktok.com/tiktokstudio/upload", use_container_width=True)
 
 # ==============================================================================
 # PÁGINA 3: MIS PROYECTOS
@@ -1021,7 +1182,7 @@ elif pagina == "⚙️ Ajustes y API Key":
     st.markdown("""
     <div class="hero-box">
         <div class="hero-title">Ajustes del Studio ⚙️</div>
-        <div class="hero-sub">Configura tus claves una sola vez y quedarán guardadas permanentemente en tu PC.</div>
+        <div class="hero-sub">Configura tus claves una sola vez para tu cuenta.</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1044,11 +1205,11 @@ elif pagina == "⚙️ Ajustes y API Key":
             placeholder="Pega aquí tu Access Token de TikTok..."
         )
 
-        if st.button("💾 Guardar todas las claves permanentemente", type="primary"):
+        if st.button("💾 Guardar todas las claves", type="primary"):
             config["api_key"] = nueva_key.strip()
             config["tiktok_token"] = nuevo_tk_token.strip()
             guardar_json(CONFIG_FILE, config)
-            st.success("¡Claves guardadas permanentemente!")
+            st.success("¡Claves guardadas!")
 
     with st.container(border=True):
         st.markdown("#### 🧹 Limpieza de archivos temporales")
