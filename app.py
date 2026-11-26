@@ -28,7 +28,7 @@ st.set_page_config(
 ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]
 YAPE_NUMERO = "+51 953 027 160"
 YAPE_WHATSAPP = "51953027160"
-VERSION_ACTUAL = "1.4.1"
+VERSION_ACTUAL = "1.4.2"
 URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
 MODELOS_GEMINI = ["gemini-3.8-flash"]
 
@@ -566,7 +566,8 @@ def enviar_codigo_gmail(destinatario: str, codigo: str):
         headers={
             "accept": "application/json",
             "api-key": api_key,
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         },
         method="POST"
     )
@@ -695,6 +696,8 @@ proyectos = cargar_json(PROJECTS_FILE, [])
 # ==============================================================================
 # MOTORES IA: GEMINI + RESPALDO AUTOMÁTICO GROQ (LLAMA 3) Y OPENAI (GPT-4O-MINI)
 # ==============================================================================
+BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
 def transcribir_audio_whisper_api(audio_path: str, proveedor: str, api_key: str) -> str:
     if proveedor == "groq":
         url = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -729,12 +732,17 @@ def transcribir_audio_whisper_api(audio_path: str, proveedor: str, api_key: str)
         data=body,
         headers={
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}"
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": BROWSER_UA
         },
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detalle = e.read().decode("utf-8", errors="ignore")
+        raise Exception(f"HTTP {e.code}: {detalle}")
 
     segmentos = data.get("segments", [])
     if segmentos:
@@ -763,12 +771,17 @@ def llamar_chat_openai_compatible(proveedor: str, api_key: str, prompt: str, esp
         data=json.dumps(payload_dict).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": BROWSER_UA
         },
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=90) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detalle = e.read().decode("utf-8", errors="ignore")
+        raise Exception(f"HTTP {e.code}: {detalle}")
     return data["choices"][0]["message"]["content"]
 
 def obtener_orden_motores():
@@ -1180,7 +1193,8 @@ def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
         data=payload,
         headers={
             "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json; charset=UTF-8"
+            "Content-Type": "application/json; charset=UTF-8",
+            "User-Agent": BROWSER_UA
         },
         method="POST"
     )
@@ -1199,7 +1213,8 @@ def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
         data=video_bytes,
         headers={
             "Content-Type": "video/mp4",
-            "Content-Range": f"bytes 0-{file_size - 1}/{file_size}"
+            "Content-Range": f"bytes 0-{file_size - 1}/{file_size}",
+            "User-Agent": BROWSER_UA
         },
         method="PUT"
     )
