@@ -354,7 +354,7 @@ def mostrar_popup_actualizacion(info):
     st.markdown(f"Tu versión actual: **`v{VERSION_ACTUAL}`** → Nueva versión: **`v{info['version']}`**")
     if info.get("notas"):
         st.info(f"**Novedades:** {info['notas']}")
-    
+
     col1, col2 = st.columns(2)
     with col1:
         if st.button("⬇️ Actualizar ahora", type="primary", use_container_width=True):
@@ -465,6 +465,18 @@ def init_db():
 def encriptar_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
+def actualizar_password(email: str, nueva_password: str) -> bool:
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute(
+        "UPDATE usuarios SET password = ? WHERE email = ?",
+        (encriptar_password(nueva_password), email.strip().lower())
+    )
+    actualizados = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return actualizados
+
 def es_admin_super(email: str) -> bool:
     return email.strip().lower() in [a.lower() for a in ADMIN_EMAILS]
 
@@ -569,7 +581,7 @@ def obtener_datos_comunidad():
 def usuario_existe(email: str) -> bool:
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
-    c.execute("SELECT 1 FROM usuarios WHERE email = ?", (email,))
+    c.execute("SELECT 1 FROM usuarios WHERE email = ?", (email.strip().lower(),))
     existe = c.fetchone() is not None
     conn.close()
     return existe
@@ -716,23 +728,36 @@ def listar_usuarios():
     conn.close()
     return rows
 
-def enviar_codigo_gmail(destinatario: str, codigo: str):
+def enviar_codigo_gmail(destinatario: str, codigo: str, motivo: str = "registro"):
     if "EMAIL_REMITENTE" not in st.secrets or "BREVO_API_KEY" not in st.secrets:
         raise Exception("Falta configurar EMAIL_REMITENTE y BREVO_API_KEY en los Secrets.")
 
     remitente = st.secrets["EMAIL_REMITENTE"].strip()
     api_key = st.secrets["BREVO_API_KEY"].strip()
 
-    payload = json.dumps({
-        "sender": {"name": "Mi Clipper IA Studio", "email": remitente},
-        "to": [{"email": destinatario}],
-        "subject": "⚡ Tu código de verificación - Mi Clipper IA Studio",
-        "textContent": (
+    if motivo == "recuperacion":
+        asunto = "🔐 Recupera tu contraseña - Mi Clipper IA Studio"
+        cuerpo = (
+            f"Hola,\n\nSolicitaste restablecer tu contraseña en Mi Clipper IA Studio.\n"
+            f"Tu código de recuperación (válido por 10 minutos) es:\n\n"
+            f"    {codigo}\n\n"
+            f"Ingrésalo en la web junto con tu nueva contraseña.\n"
+            f"Si no solicitaste este cambio, ignora este correo y tu contraseña actual seguirá intacta."
+        )
+    else:
+        asunto = "⚡ Tu código de verificación - Mi Clipper IA Studio"
+        cuerpo = (
             f"Hola,\n\nTu código de verificación para crear tu cuenta en Mi Clipper IA Studio es:\n\n"
             f"    {codigo}\n\n"
             f"Ingrésalo en la web para activar tu cuenta.\n"
             f"Si no solicitaste este código, ignora este correo."
         )
+
+    payload = json.dumps({
+        "sender": {"name": "Mi Clipper IA Studio", "email": remitente},
+        "to": [{"email": destinatario}],
+        "subject": asunto,
+        "textContent": cuerpo
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -767,7 +792,7 @@ if "transcripciones_cache" not in st.session_state:
     st.session_state["transcripciones_cache"] = {}
 
 # ==============================================================================
-# PANTALLA DE LOGIN / REGISTRO CON GMAIL
+# PANTALLA DE LOGIN / REGISTRO / RECUPERAR CONTRASEÑA CON GMAIL
 # ==============================================================================
 if not st.session_state["autenticado"]:
     _, col_centro, _ = st.columns([1, 1.6, 1])
@@ -775,12 +800,16 @@ if not st.session_state["autenticado"]:
         st.markdown("""
         <div class="hero-box">
             <div class="hero-title">⚡ Mi Clipper IA Studio</div>
-            <div class="hero-sub">Inicia sesión o crea tu cuenta con Gmail para empezar a crear clips virales.</div>
+            <div class="hero-sub">Inicia sesión, crea tu cuenta o recupera tu contraseña con Gmail.</div>
         </div>
         """, unsafe_allow_html=True)
 
         with st.container(border=True):
-            tab_login, tab_registro = st.tabs(["🔐 Iniciar Sesión", "✨ Crear Cuenta"])
+            tab_login, tab_registro, tab_recuperar = st.tabs([
+                "🔐 Iniciar Sesión",
+                "✨ Crear Cuenta",
+                "🔑 Olvidé mi contraseña"
+            ])
 
             with tab_login:
                 email_login = st.text_input("Correo Gmail", key="login_email", placeholder="tucorreo@gmail.com").strip().lower()
@@ -809,7 +838,7 @@ if not st.session_state["autenticado"]:
                         codigo = str(random.randint(100000, 999999))
                         try:
                             with st.spinner("Enviando código a tu Gmail..."):
-                                enviar_codigo_gmail(email_reg, codigo)
+                                enviar_codigo_gmail(email_reg, codigo, motivo="registro")
                             st.session_state["codigo_enviado"] = codigo
                             st.session_state["email_pendiente"] = email_reg
                             st.session_state["pass_pendiente"] = pass_reg
@@ -819,7 +848,7 @@ if not st.session_state["autenticado"]:
 
                 if "codigo_enviado" in st.session_state:
                     st.divider()
-                    codigo_ingresado = st.text_input("Ingresa el código de 6 dígitos").strip()
+                    codigo_ingresado = st.text_input("Ingresa el código de 6 dígitos", key="reg_codigo_in").strip()
 
                     if st.button("✅ Verificar y crear cuenta", type="primary", use_container_width=True):
                         if codigo_ingresado == st.session_state["codigo_enviado"]:
@@ -831,6 +860,57 @@ if not st.session_state["autenticado"]:
                                 st.error("Ese correo ya está registrado.")
                         else:
                             st.error("Código incorrecto. Inténtalo de nuevo.")
+
+            with tab_recuperar:
+                st.caption("Te enviaremos un código de 6 dígitos a tu Gmail registrado para cambiar tu contraseña.")
+                email_rec = st.text_input(
+                    "Correo Gmail de tu cuenta",
+                    key="rec_email",
+                    placeholder="tucorreo@gmail.com"
+                ).strip().lower()
+
+                if st.button("📩 Enviar código de recuperación", type="primary", use_container_width=True):
+                    if not email_rec.endswith("@gmail.com"):
+                        st.warning("Ingresa un correo válido terminado en @gmail.com.")
+                    elif not usuario_existe(email_rec):
+                        st.error("No existe ninguna cuenta registrada con ese correo.")
+                    else:
+                        codigo_rec = str(random.randint(100000, 999999))
+                        try:
+                            with st.spinner("Enviando código de recuperación a tu Gmail..."):
+                                enviar_codigo_gmail(email_rec, codigo_rec, motivo="recuperacion")
+                            st.session_state["rec_codigo"] = codigo_rec
+                            st.session_state["rec_email_pendiente"] = email_rec
+                            st.session_state["rec_expira"] = time.time() + 600
+                            st.success("¡Código enviado! Revisa tu bandeja de entrada o Spam (expira en 10 minutos).")
+                        except Exception as e:
+                            st.error(f"Error al enviar el correo: {e}")
+
+                if "rec_codigo" in st.session_state and "rec_email_pendiente" in st.session_state:
+                    st.divider()
+                    st.info(f"Código enviado a **{st.session_state['rec_email_pendiente']}**")
+                    codigo_rec_in = st.text_input("Código de 6 dígitos", key="rec_codigo_in").strip()
+                    nueva_pass = st.text_input("Nueva contraseña (mín. 6 caracteres)", type="password", key="rec_new_pass")
+                    confirmar_pass = st.text_input("Confirmar nueva contraseña", type="password", key="rec_conf_pass")
+
+                    if st.button("🔄 Cambiar contraseña", type="primary", use_container_width=True):
+                        if time.time() > st.session_state.get("rec_expira", 0):
+                            st.error("El código ha expirado. Solicita uno nuevo.")
+                            for k in ("rec_codigo", "rec_email_pendiente", "rec_expira"):
+                                st.session_state.pop(k, None)
+                        elif codigo_rec_in != st.session_state["rec_codigo"]:
+                            st.error("El código de verificación es incorrecto.")
+                        elif len(nueva_pass) < 6:
+                            st.warning("La nueva contraseña debe tener al menos 6 caracteres.")
+                        elif nueva_pass != confirmar_pass:
+                            st.warning("Las contraseñas no coinciden.")
+                        else:
+                            if actualizar_password(st.session_state["rec_email_pendiente"], nueva_pass):
+                                st.success("¡Contraseña actualizada con éxito! Ya puedes iniciar sesión con tu nueva clave.")
+                                for k in ("rec_codigo", "rec_email_pendiente", "rec_expira"):
+                                    st.session_state.pop(k, None)
+                            else:
+                                st.error("No se pudo actualizar la contraseña. Inténtalo de nuevo.")
     st.stop()
 
 # ==============================================================================
@@ -1178,7 +1258,7 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
     resumen = " | ".join(errores)
     raise Exception(f"No se pudo completar con ningún motor IA. Revisa tus llaves en la barra lateral (⚙️ Opciones). Detalle: {resumen}")
 
-# --- COLORES Y LAYOUTS ---
+# --- COLORES, FUENTES, PRESETS Y LAYOUTS ---
 COLORES_SUBTITULOS = {
     "Amarillo viral": "&H0000FFFF",
     "Blanco limpio": "&H00FFFFFF",
@@ -1189,6 +1269,21 @@ COLORES_SUBTITULOS = {
     "Naranja fuego": "&H000088FF",
 }
 
+FUENTES_SUBTITULOS = {
+    "Impacto Bold (Arial Black)": "Arial Black",
+    "Clásico Viral (Impact)": "Impact",
+    "Limpio Moderno (DejaVu Sans)": "DejaVu Sans",
+    "Editorial (Liberation Sans)": "Liberation Sans",
+    "Nítido (Verdana)": "Verdana",
+    "Dinámico (Trebuchet MS)": "Trebuchet MS",
+}
+
+PRESETS_SUBTITULOS = {
+    "🔥 TikTok Clásico": {"color": "Amarillo viral", "tamano": 22, "x_pct": 50, "y_pct": 82, "fuente": "Impacto Bold (Arial Black)"},
+    "🎯 Gancho Arriba": {"color": "Cian eléctrico", "tamano": 24, "x_pct": 50, "y_pct": 18, "fuente": "Clásico Viral (Impact)"},
+    "✨ Centro Dramático": {"color": "Blanco limpio", "tamano": 23, "x_pct": 50, "y_pct": 50, "fuente": "Limpio Moderno (DejaVu Sans)"},
+}
+
 LAYOUTS_VIDEO = [
     "Pantalla completa (9:16)",
     "Imagen entera + fondo blur (9:16)",
@@ -1197,47 +1292,73 @@ LAYOUTS_VIDEO = [
     "Cuadrado (1:1)"
 ]
 
-# --- FUNCIONES DE VIDEO, IA, TENDENCIAS Y TIKTOK ---
+# --- FUNCIONES DE STREAM DIRECTO (SIN DESCARGAR VIDEO COMPLETO), SUBTÍTULOS E IA ---
 
-def descargar_video(url: str, proj_id: str) -> str:
-    output_path = WORK_DIR / f"video_{proj_id}.mp4"
-    if output_path.exists():
-        output_path.unlink()
+def _obtener_cookies_path() -> str:
+    cookies_usuario = USER_BASE / "cookies.txt"
+    cookies_global = Path("cookies.txt")
+    if cookies_usuario.exists():
+        return str(cookies_usuario)
+    if cookies_global.exists():
+        return str(cookies_global)
+    return ""
+
+def obtener_stream_directo_url(url: str) -> str:
+    """Obtiene la URL directa del stream sin descargar el video completo a disco."""
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
-        "--extractor-args", "youtube:player_client=android,web",
-        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "-o", str(output_path),
-        url
+        "--extractor-args", "youtube:player_client=web_safari,android,web",
+        "-g",
+        "-f", "best[height<=1080][ext=mp4]/best[ext=mp4]/best",
     ]
-    resultado = subprocess.run(cmd, capture_output=True, text=True)
-    if resultado.returncode != 0:
-        raise Exception(f"No hemos podido importar este enlace:\n{resultado.stderr}")
-    return str(output_path)
+    cookies_path = _obtener_cookies_path()
+    if cookies_path:
+        cmd += ["--cookies", cookies_path]
+    cmd.append(url)
 
-def extraer_audio(video_path: str, proj_id: str, min_inicio: float = 0.0, min_fin: float = 0.0) -> str:
+    resultado = subprocess.run(cmd, capture_output=True, text=True)
+    if resultado.returncode != 0 or not resultado.stdout.strip():
+        cmd_av = [
+            sys.executable, "-m", "yt_dlp",
+            "--no-playlist",
+            "--extractor-args", "youtube:player_client=web_safari,android,web",
+            "-g",
+            "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best",
+        ]
+        if cookies_path:
+            cmd_av += ["--cookies", cookies_path]
+        cmd_av.append(url)
+        res_av = subprocess.run(cmd_av, capture_output=True, text=True)
+        if res_av.returncode != 0 or not res_av.stdout.strip():
+            err_msg = res_av.stderr.strip() or resultado.stderr.strip()
+            raise Exception(f"No se pudo acceder al stream en vivo del enlace:\n{err_msg}")
+        return res_av.stdout.strip().splitlines()[0].strip()
+
+    return resultado.stdout.strip().splitlines()[0].strip()
+
+def extraer_audio(fuente_video: str, proj_id: str, min_inicio: float = 0.0, min_fin: float = 0.0) -> str:
+    """Extrae solo el audio ligero (MP3 32k) directo desde un archivo local o URL de stream."""
     audio_path = WORK_DIR / f"audio_{proj_id}.mp3"
     if audio_path.exists():
         audio_path.unlink()
     cmd = ["ffmpeg", "-y"]
     if min_inicio > 0:
         cmd += ["-ss", str(min_inicio * 60)]
-    cmd += ["-i", video_path]
+    cmd += ["-i", fuente_video]
     if min_fin > min_inicio:
         cmd += ["-t", str((min_fin - min_inicio) * 60)]
     cmd += ["-vn", "-ac", "1", "-ar", "16000", "-acodec", "libmp3lame", "-b:a", "32k", str(audio_path)]
 
     resultado = subprocess.run(cmd, capture_output=True, text=True)
     if resultado.returncode != 0:
-        raise Exception(f"Error al preparar el audio con FFmpeg:\n{resultado.stderr}")
+        raise Exception(f"Error al extraer el audio con FFmpeg:\n{resultado.stderr}")
     return str(audio_path)
 
-def obtener_duracion_video(video_path: str) -> float:
+def obtener_duracion_video(fuente_video: str) -> float:
     cmd = [
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", video_path
+        "-of", "default=noprint_wrappers=1:nokey=1", fuente_video
     ]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True)
@@ -1245,11 +1366,162 @@ def obtener_duracion_video(video_path: str) -> float:
     except Exception:
         return 60.0
 
-def buscar_momentos_ia(audio_path: str, instruccion_usuario: str, num_clips: int, duracion_objetivo: str, offset_seg: float = 0.0):
-    if not instruccion_usuario.strip():
-        instruccion_usuario = "Elige automáticamente los momentos con mayor retención, gancho inicial y potencial viral."
+def obtener_dimensiones_video(fuente_video: str):
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x", fuente_video
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        w, h = res.stdout.strip().split("x")
+        return int(w), int(h)
+    except Exception:
+        return 1080, 1920
 
-    prompt = f"""
+def agrupar_en_subtitulos_cortos(texto_con_tiempos: str, max_palabras: int = 4) -> list:
+    bloques = []
+    for linea in texto_con_tiempos.splitlines():
+        linea = linea.strip()
+        if not linea.startswith("[") or "]" not in linea:
+            continue
+        rango_str, frase = linea[1:].split("]", 1)
+        frase = frase.strip()
+        if not frase or "-" not in rango_str:
+            continue
+        try:
+            ini_s = float(rango_str.split("-")[0].replace("s", "").strip())
+            fin_s = float(rango_str.split("-")[1].replace("s", "").strip())
+        except ValueError:
+            continue
+
+        palabras = frase.split()
+        if not palabras:
+            continue
+
+        dur_total = max(0.4, fin_s - ini_s)
+        num_chunks = max(1, (len(palabras) + max_palabras - 1) // max_palabras)
+        paso_dur = dur_total / num_chunks
+
+        for idx_bloque, i in enumerate(range(0, len(palabras), max_palabras)):
+            sub_txt = " ".join(palabras[i:i + max_palabras])
+            b_ini = round(ini_s + (idx_bloque * paso_dur), 2)
+            b_fin = round(min(fin_s, b_ini + paso_dur), 2)
+            if b_fin <= b_ini:
+                b_fin = round(b_ini + 0.4, 2)
+            bloques.append({"start": b_ini, "end": b_fin, "text": sub_txt})
+    return bloques
+
+def generar_subtitulos_desde_video(fuente_video: str, cfg: dict, max_palabras: int = 4) -> list:
+    gr_key = cfg.get("groq_key", "").strip()
+    oa_key = cfg.get("openai_key", "").strip()
+    if gr_key:
+        prov, llave = "groq", gr_key
+    elif oa_key:
+        prov, llave = "openai", oa_key
+    else:
+        raise Exception("Agrega una Groq API Key u OpenAI API Key en ⚙️ Opciones para generar subtítulos automáticos.")
+
+    audio_tmp = extraer_audio(fuente_video, f"sub_{uuid.uuid4().hex[:8]}")
+    try:
+        transcripcion = transcribir_audio_whisper_api(audio_tmp, prov, llave)
+        return agrupar_en_subtitulos_cortos(transcripcion, max_palabras=max_palabras)
+    finally:
+        if os.path.exists(audio_tmp):
+            try:
+                os.remove(audio_tmp)
+            except Exception:
+                pass
+
+def generar_ass_con_posicion(
+    subtitulos: list,
+    ass_path: str,
+    ancho_vid: int,
+    alto_vid: int,
+    fuente: str,
+    tamano: int,
+    color_ass: str,
+    x_pct: int,
+    y_pct: int
+):
+    pos_x = int((max(5, min(95, x_pct)) / 100.0) * ancho_vid)
+    pos_y = int((max(8, min(92, y_pct)) / 100.0) * alto_vid)
+    escala_font = max(12, int(round(tamano * (alto_vid / 1280.0) * 1.45)))
+
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {ancho_vid}\n"
+        f"PlayResY: {alto_vid}\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{fuente},{escala_font},{color_ass},&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,5,20,20,20,1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+    def fmt_ass(seg_val: float) -> str:
+        seg_val = max(0.0, float(seg_val))
+        h = int(seg_val // 3600)
+        m = int((seg_val % 3600) // 60)
+        s = int(seg_val % 60)
+        cs = int(round((seg_val - int(seg_val)) * 100))
+        if cs >= 100:
+            cs = 99
+        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+    eventos = []
+    for item in subtitulos:
+        txt_limpio = str(item.get("text", "")).replace("{", "").replace("}", "").replace("\n", " ").strip()
+        if not txt_limpio:
+            continue
+        ini_ass = fmt_ass(item.get("start", 0.0))
+        fin_ass = fmt_ass(item.get("end", 1.0))
+        eventos.append(f"Dialogue: 0,{ini_ass},{fin_ass},Default,,0,0,0,,{{\\pos({pos_x},{pos_y})}}{txt_limpio}")
+
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(header + "\n".join(eventos) + "\n")
+
+def quemar_subtitulos_en_video(
+    input_video: str,
+    output_video: str,
+    subtitulos: list,
+    fuente_nombre: str,
+    tamano: int,
+    color_ass: str,
+    x_pct: int,
+    y_pct: int
+):
+    if not subtitulos:
+        raise Exception("No hay subtítulos para quemar.")
+
+    w_vid, h_vid = obtener_dimensiones_video(input_video)
+    ass_path = str(WORK_DIR / f"subs_{uuid.uuid4().hex[:8]}.ass")
+    fuente_real = FUENTES_SUBTITULOS.get(fuente_nombre, "Arial Black")
+    generar_ass_con_posicion(subtitulos, ass_path, w_vid, h_vid, fuente_real, tamano, color_ass, x_pct, y_pct)
+
+    ass_ffmpeg = ass_path.replace("\\", "/").replace(":", "\\:")
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_video,
+        "-vf", f"ass='{ass_ffmpeg}'",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "copy",
+        output_video
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            raise Exception(f"Error al quemar subtítulos:\n{res.stderr}")
+    finally:
+        if os.path.exists(ass_path):
+            try:
+                os.remove(ass_path)
+            except Exception:
+                pass
+
+def prompt_clips_pro(instruccion_usuario: str, num_clips: int, duracion_objetivo: str) -> str:
+    return f"""
     Eres el asistente IA de edición de video estilo Nexus Clips.
     Analiza este audio y extrae los {num_clips} mejores momentos que cumplan EXACTAMENTE con lo que pide el creador.
 
@@ -1257,31 +1529,62 @@ def buscar_momentos_ia(audio_path: str, instruccion_usuario: str, num_clips: int
     DURACIÓN OBJETIVO POR CLIP: {duracion_objetivo}
 
     REGLAS:
-- Los cortes deben empezar y terminar en frases completas.
-- Devuelve exclusivamente un JSON válido con una lista bajo la clave "clips".
-- Sé conciso en "motivo" y "subtitulos" (máximo 3 frases cortas por clip) para que la respuesta sea rápida y completa.
-- Cada clip debe incluir:
-  - "titulo": título/gancho corto
-  - "gancho_visual": texto ultra corto (3 a 6 palabras en MAYÚSCULAS)
-  - "start": segundo exacto de inicio en el audio (float)
-  - "end": segundo exacto de fin en el audio (float)
-  - "motivo": razón breve de por qué este momento funciona
-  - "puntaje_viral": entero del 1 al 100
-  - "descripcion_redes": copy corto para TikTok/Shorts con hashtags
-  - "subtitulos": lista de 2 a 3 frases cortas con "start", "end" y "text".
+    - Los cortes deben empezar y terminar en frases completas.
+    - Devuelve exclusivamente un JSON válido con una lista bajo la clave "clips".
+    - Sé conciso en "motivo" y "subtitulos" (máximo 3 frases cortas por clip).
+    - Cada clip debe incluir:
+      - "titulo": título/gancho corto
+      - "gancho_visual": texto ultra corto (3 a 6 palabras en MAYÚSCULAS)
+      - "start": segundo exacto de inicio en el audio (float)
+      - "end": segundo exacto de fin en el audio (float)
+      - "motivo": razón breve de por qué este momento funciona
+      - "puntaje_viral": entero del 1 al 100
+      - "descripcion_redes": copy corto para TikTok/Shorts con hashtags
+      - "subtitulos": lista de 2 a 3 frases cortas con "start", "end" y "text".
     """
 
-    tokens_salida = 3200 if num_clips > 5 else 2200
+def procesar_clips(texto_json: str, offset_seg: float = 0.0) -> list:
+    limpio = texto_json.strip()
+    if limpio.startswith("```"):
+        lineas = limpio.splitlines()
+        if len(lineas) >= 3:
+            limpio = "\n".join(lineas[1:-1]).strip()
+    data = json.loads(limpio)
+    clips = data.get("clips", []) if isinstance(data, dict) else []
+    resultado = []
+    for c in clips:
+        if not isinstance(c, dict):
+            continue
+        start_val = round(float(c.get("start", 0.0)) + float(offset_seg or 0.0), 2)
+        end_val = round(float(c.get("end", start_val + 20.0)) + float(offset_seg or 0.0), 2)
+        if end_val <= start_val:
+            end_val = round(start_val + 20.0, 2)
+        resultado.append({
+            "titulo": str(c.get("titulo", "Clip viral")).strip(),
+            "gancho_visual": str(c.get("gancho_visual", "")).strip(),
+            "start": start_val,
+            "end": end_val,
+            "motivo": str(c.get("motivo", "Momento con buena retención.")).strip(),
+            "puntaje_viral": int(c.get("puntaje_viral", 85)),
+            "descripcion_redes": str(c.get("descripcion_redes", "")).strip(),
+            "subtitulos": c.get("subtitulos", []) if isinstance(c.get("subtitulos"), list) else []
+        })
+    return resultado
+
+def buscar_momentos_ia(audio_path: str, instruccion_usuario: str, num_clips: int, duracion_objetivo: str, offset_seg: float = 0.0):
+    if not instruccion_usuario.strip():
+        instruccion_usuario = "Elige automáticamente los momentos con mayor retención, gancho inicial y potencial viral."
+
+    prompt = prompt_clips_pro(instruccion_usuario, num_clips, duracion_objetivo)
+    tokens_salida = 3600 if num_clips > 5 else 2600
     texto_json, motor_usado = ejecutar_ia_con_respaldo(prompt, audio_path=audio_path, esperar_json=True, max_tokens=tokens_salida)
-    clips = json.loads(texto_json)["clips"]
-    if offset_seg > 0:
-        for c in clips:
-            c["start"] = round(float(c["start"]) + offset_seg, 2)
-            c["end"] = round(float(c["end"]) + offset_seg, 2)
+    clips = procesar_clips(texto_json, offset_seg)
+    if not clips:
+        raise Exception("La IA no devolvió clips válidos. Inténtalo de nuevo o cambia el motor en ⚙️ Opciones.")
     return clips, motor_usado
 
-def analizar_clip_para_redes_ia(video_path: str, tono: str, contexto_extra: str = ""):
-    audio_temp = extraer_audio(video_path, f"tk_{datetime.now().strftime('%H%M%S')}")
+def analizar_clip_para_redes_ia(fuente_video: str, tono: str, contexto_extra: str = ""):
+    audio_temp = extraer_audio(fuente_video, f"tk_{datetime.now().strftime('%H%M%S')}")
     prompt = f"""
     Eres un director creativo experto en viralidad de TikTok y YouTube Shorts.
     Analiza este clip y genera el mejor empaque viral posible.
@@ -1313,18 +1616,18 @@ def buscar_tendencias_tiktok_ia(nicho: str, region: str, detalle_extra: str = ""
     ENFOQUE EXTRA: {detalle_extra if detalle_extra.strip() else "Lo más viral y con mayor retención actual"}
 
     Responde en español con formato limpio:
-    1. **🔥 Top 5 Temas en tendencia** (1 línea por tema).
-    2. **🎣 5 Ganchos (Hooks) de 3 segundos** (cortos y listos para usar).
-    3. **🎬 3 Ideas de clips** (1 línea por idea).
-    4. **🤖 Prompt molde para el Chat IA** (una frase exacta de máximo 2 líneas para buscar clips en videos largos).
+1. **🔥 Top 5 Temas en tendencia** (1 línea por tema).
+2. **🎣 5 Ganchos (Hooks) de 3 segundos** (cortos y listos para usar).
+3. **🎬 3 Ideas de clips** (1 línea por idea).
+4. **🤖 Prompt molde para el Chat IA** (una frase exacta de máximo 2 líneas para buscar clips en videos largos).
     """
     return ejecutar_ia_con_respaldo(prompt, esperar_json=False, usar_google_search=True)
 
 def clonar_formula_viral_ia(tiktok_url: str):
     proj_id = f"clon_{datetime.now().strftime('%H%M%S')}"
-    v_path = descargar_video(tiktok_url, proj_id)
-    dur = obtener_duracion_video(v_path)
-    a_path = extraer_audio(v_path, proj_id)
+    stream_url = obtener_stream_directo_url(tiktok_url)
+    dur = obtener_duracion_video(stream_url)
+    a_path = extraer_audio(stream_url, proj_id)
 
     prompt = f"""
     Eres un experto en ingeniería inversa de videos virales de TikTok.
@@ -1350,7 +1653,7 @@ def clonar_formula_viral_ia(tiktok_url: str):
                 pass
 
     datos = json.loads(texto_json)
-    datos["video_path"] = v_path
+    datos["stream_url"] = stream_url
     return datos, motor_usado
 
 def formatear_tiempo_srt(segundos: float) -> str:
@@ -1369,7 +1672,7 @@ def generar_srt_clip(subtitulos: list, srt_filename: str):
         f.write("\n".join(lineas))
 
 def renderizar_clip(
-    video_path: str,
+    fuente_video: str,
     start: float,
     end: float,
     output_path: str,
@@ -1384,7 +1687,8 @@ def renderizar_clip(
     duracion = max(1.0, end - start)
     usar_sub = usar_subtitulos and srt_filename and os.path.exists(srt_filename)
     sub_style = f"FontName=Arial Black,FontSize={tamano_sub},PrimaryColour={color_sub},OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=55"
-    sub_filter = f"subtitles={srt_filename}:force_style='{sub_style}'" if usar_sub else ""
+    srt_esc = srt_filename.replace("\\", "/").replace(":", "\\:") if srt_filename else ""
+    sub_filter = f"subtitles='{srt_esc}':force_style='{sub_style}'" if usar_sub else ""
     watermark_filter = "drawtext=text='Mi Clipper':fontcolor=white@0.55:fontsize=24:box=1:boxcolor=black@0.35:boxborderw=6:x=w-tw-20:y=20"
 
     if con_marca_agua:
@@ -1397,7 +1701,7 @@ def renderizar_clip(
         w_v, h_v = 720, 1280
         crf_val = "22"
 
-    cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", video_path, "-t", str(duracion)]
+    cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", fuente_video, "-t", str(duracion)]
 
     if layout == "Imagen entera + fondo blur (9:16)":
         fc = (
@@ -1486,7 +1790,7 @@ def editar_video_ffmpeg(input_path: str, output_path: str, start: float, end: fl
 
 def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
     file_size = os.path.getsize(video_path)
-    init_url = "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/"
+    init_url = "[https://open.tiktokapis.com/v2/post/publish/inbox/video/init/](https://open.tiktokapis.com/v2/post/publish/inbox/video/init/)"
     payload = json.dumps({
         "source_info": {
             "source": "FILE_UPLOAD",
@@ -1531,13 +1835,96 @@ def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
             raise Exception(f"Error al subir archivo a TikTok (HTTP {put_resp.status})")
     return True
 
+def ui_resultados(st_mod, clips_encontrados, video_path, proj_id, clips_dir, work_dir, es_pro, user_config, guardar_cfg_cb):
+    st_mod.markdown('<span class="step-pill">PASO 3 · RESULTADOS</span>', unsafe_allow_html=True)
+    st_mod.markdown("### Tus clips sugeridos")
+
+    for i, clip in enumerate(clips_encontrados):
+        with st_mod.expander(f"🎬 Clip #{i+1}: {clip['titulo']}  ·  🔥 {clip['puntaje_viral']}/100", expanded=True):
+            col_info, col_render = st_mod.columns([1.8, 1.2])
+            with col_info:
+                st_mod.markdown(f'<span class="viral-badge">🔥 Viralidad {clip["puntaje_viral"]}/100</span>', unsafe_allow_html=True)
+                st_mod.write(f"**Por qué funciona:** {clip['motivo']}")
+
+                if es_pro:
+                    if clip.get("gancho_visual"):
+                        st_mod.markdown(f"**🎯 Gancho visual sugerido:** `{clip['gancho_visual']}`")
+                    if clip.get("descripcion_redes"):
+                        st_mod.info(f"**Magic Post (Copy para TikTok / YouTube):**\n\n{clip['descripcion_redes']}")
+
+                    t1, t2 = st_mod.columns(2)
+                    inicio = t1.number_input("Inicio (seg)", value=float(clip["start"]), key=f"start_{i}")
+                    fin = t2.number_input("Fin (seg)", value=float(clip["end"]), key=f"end_{i}")
+
+                    o1, o2 = st_mod.columns(2)
+                    layout_clip = o1.selectbox("📐 Encuadre", LAYOUTS_VIDEO, index=0, key=f"lay_{i}")
+                    calidad_clip = o2.selectbox("📺 Calidad de descarga", ["HD (720p)", "Full HD (1080p)"], index=1, key=f"cal_{i}")
+
+                    s1, s2, s3 = st_mod.columns(3)
+                    usar_sub = s1.checkbox("💬 Con subtítulos", value=True, key=f"usub_{i}")
+                    color_nombre = s2.selectbox("🎨 Color subtítulos", list(COLORES_SUBTITULOS.keys()), index=0, key=f"col_{i}")
+                    tamano_sub = s3.slider("🔠 Tamaño letra", 14, 28, 20, key=f"tam_{i}")
+                    color_ass = COLORES_SUBTITULOS[color_nombre]
+                else:
+                    inicio = float(clip["start"])
+                    fin = float(clip["end"])
+                    layout_clip = "Pantalla completa (9:16)"
+                    calidad_clip = "480p (Free)"
+                    usar_sub = False
+                    color_ass = "&H00FFFFFF"
+                    tamano_sub = 18
+                    st_mod.caption("🔒 Recorte manual, reencuadre, subtítulos de colores/tamaño y descarga HD/Full HD sin marca de agua están disponibles desde el **Plan Pro**.")
+
+            with col_render:
+                out_file = str(Path(clips_dir) / f"{proj_id}_clip_{i+1}.mp4")
+
+                if st_mod.button(f"✂️ Crear Clip #{i+1}", type="primary", use_container_width=True, key=f"render_{i}"):
+                    try:
+                        with st_mod.spinner("Renderizando clip…"):
+                            srt_temp = None
+                            if usar_sub and clip.get("subtitulos"):
+                                srt_temp = str(Path(work_dir) / f"temp_sub_{i+1}.srt")
+                                generar_srt_clip(clip["subtitulos"], srt_temp)
+
+                            renderizar_clip(
+                                video_path,
+                                inicio, fin, out_file,
+                                layout=layout_clip,
+                                usar_subtitulos=usar_sub,
+                                color_sub=color_ass,
+                                tamano_sub=tamano_sub,
+                                srt_filename=srt_temp,
+                                calidad=calidad_clip,
+                                con_marca_agua=(not es_pro)
+                            )
+                            if srt_temp and os.path.exists(srt_temp):
+                                os.remove(srt_temp)
+                        st_mod.success("¡Clip listo!")
+                    except Exception as e:
+                        st_mod.error(str(e))
+
+                if os.path.exists(out_file):
+                    st_mod.video(out_file)
+                    etiqueta_dl = f"⬇️ Descargar {calidad_clip}" if es_pro else "⬇️ Descargar (con marca de agua)"
+                    with open(out_file, "rb") as f:
+                        st_mod.download_button(
+                            label=etiqueta_dl,
+                            data=f,
+                            file_name=f"clip_{i+1}_{proj_id}.mp4",
+                            mime="video/mp4",
+                            use_container_width=True,
+                            key=f"dl_{i}"
+                        )
+
 # --- BARRA DE NAVEGACIÓN SUPERIOR SIEMPRE VISIBLE ---
+nivel_plan_tmp, _ = obtener_estado_plan(st.session_state["usuario"]) if st.session_state.get("usuario") else ("FREE", "Plan Free")
+es_super_pro_tmp = (nivel_plan_tmp == "SUPER_PRO")
+usuario_es_admin_tmp = es_admin(st.session_state["usuario"]) if st.session_state.get("usuario") else False
+
 opciones_menu = ["💬 Inicio (Chat IA)", "✂️ Editor y Redes", "📈 Tendencias TikTok", "👥 Comunidad", "📁 Mis Proyectos"]
-
-if not es_super_pro and not usuario_es_admin:
+if not es_super_pro_tmp and not usuario_es_admin_tmp:
     opciones_menu.append("💎 Planes / Key")
-
-if usuario_es_admin:
+if usuario_es_admin_tmp:
     opciones_menu.append("👑 Panel Admin")
 
 if st.session_state["pagina_actual"] not in opciones_menu:
@@ -1559,6 +1946,55 @@ if nav_cols[-1].button("🚪 Salir", key="top_nav_logout", use_container_width=T
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     st.rerun()
+
+# --- ESTADO DEL USUARIO ACTUAL (FREE / PRO / SUPER_PRO / ADMIN) ---
+nivel_plan, texto_plan = obtener_estado_plan(st.session_state["usuario"])
+es_pro = nivel_plan in ("PRO", "SUPER_PRO")
+es_super_pro = (nivel_plan == "SUPER_PRO")
+usuario_es_admin = es_admin(st.session_state["usuario"])
+
+# --- RUTAS Y ARCHIVOS SEPARADOS POR USUARIO ---
+USER_HASH = hashlib.md5(st.session_state["usuario"].encode()).hexdigest()[:12]
+USER_BASE = Path("user_data") / USER_HASH
+WORK_DIR = USER_BASE / "workspace"
+CLIPS_DIR = USER_BASE / "clips_generados"
+EDITED_DIR = USER_BASE / "clips_editados"
+USER_CONFIG_FILE = USER_BASE / "config_usuario.json"
+PROJECTS_FILE = USER_BASE / "proyectos.json"
+
+WORK_DIR.mkdir(parents=True, exist_ok=True)
+CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+EDITED_DIR.mkdir(parents=True, exist_ok=True)
+
+def cargar_json(path: Path, default):
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+    return default
+
+def guardar_json(path: Path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+user_config = cargar_json(USER_CONFIG_FILE, {})
+proyectos = cargar_json(PROJECTS_FILE, [])
+
+# ==============================================================================
+# SKILLS DE AGENTE (INSTRUCCIONES DE ESTILO / SUBAGENTE)
+# ==============================================================================
+SKILLS_DISPONIBLES = {
+    "⚡ Viral Sniper (Ganchos rápidos y retención)": "Prioriza cortes con gancho agresivo en los primeros 2 segundos, giros rápidos y frases que detienen el scroll.",
+    "🎬 Storyteller / Subagente Narrativo": "Actúa como subagente narrativo: busca arcos completos con inicio, tensión y remate claro, sin cortar ideas a medias.",
+    "🔥 Debate / Polémica / Contraste": "Enfócate en opiniones fuertes, comparaciones extremas, errores comunes y momentos que provoquen comentarios.",
+    "🎓 Educativo / Valor Directo": "Extrae explicaciones claras, pasos prácticos, datos sorprendentes y conclusiones accionables."
+}
+
+def obtener_instruccion_skill() -> str:
+    skill_sel = user_config.get("skill_ia", list(SKILLS_DISPONIBLES.keys())[0])
+    return SKILLS_DISPONIBLES.get(skill_sel, "")
 
 # --- BARRA LATERAL (ENGRANAJE "OPCIONES" + DEEPSEEK BETA + SKILL + ACTUALIZACIONES) ---
 total_clips_creados = len(list(CLIPS_DIR.glob("*.mp4"))) + len(list(EDITED_DIR.glob("*.mp4")))
@@ -1653,7 +2089,7 @@ if pagina == "💬 Inicio (Chat IA)":
     st.markdown("""
     <div class="hero-box">
         <div class="hero-title">¿Qué creamos hoy? ⚡</div>
-        <div class="hero-sub">Convierte cualquier vídeo largo en clips virales listos para TikTok y YouTube Shorts.</div>
+        <div class="hero-sub">Analiza enlaces directo en vivo sin descargar el vídeo completo y genera clips virales.</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1672,16 +2108,16 @@ if pagina == "💬 Inicio (Chat IA)":
     if st.session_state.pop("ir_a_resultados", False) and "proyecto_activo" in st.session_state:
         p = st.session_state["proyecto_activo"]
         st.session_state["proj_id"] = p["id"]
-        st.session_state["video_path"] = p["video_path"]
+        st.session_state["video_path"] = p.get("video_path") or p.get("stream_url", "")
         st.session_state["audio_path"] = p["audio_path"]
         st.session_state["clips_encontrados"] = p["clips"]
         st.session_state["nombre_proyecto"] = p["nombre"]
 
     # --- PASO 1 ---
     with st.container(border=True):
-        st.markdown('<span class="step-pill">PASO 1 · IMPORTAR</span>', unsafe_allow_html=True)
-        st.markdown("### Trae tu vídeo")
-        tab_link, tab_file = st.tabs(["🔗 Enlace (YouTube / Twitch / TikTok)", "📁 Subir desde mi PC"])
+        st.markdown('<span class="step-pill">PASO 1 · PROCESAR EN VIVO</span>', unsafe_allow_html=True)
+        st.markdown("### Conecta tu vídeo (sin descargar el archivo completo)")
+        tab_link, tab_file = st.tabs(["🔗 Enlace directo (YouTube / Twitch / TikTok)", "📁 Subir desde mi PC"])
 
         col_r1, col_r2, col_r3 = st.columns([2, 1, 1])
         modo_rango = col_r1.radio("Rango del vídeo:", ["Todo el vídeo", "Solo una parte (vídeos largos)"], horizontal=True)
@@ -1691,24 +2127,23 @@ if pagina == "💬 Inicio (Chat IA)":
             min_fin = col_r3.number_input("Fin (min)", min_value=0.0, value=10.0, step=1.0)
 
         with tab_link:
-            url_input = st.text_input("Pega el link aquí:", placeholder="https://www.youtube.com/watch?v=...")
-            if st.button("⬇️ Importar vídeo", type="primary", key="btn_import_url"):
+            url_input = st.text_input("Pega el link aquí:", placeholder="[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=)...")
+            if st.button("⚡ Analizar enlace directo", type="primary", key="btn_import_url"):
                 if not url_input:
                     st.warning("Pega un enlace primero.")
                 else:
                     try:
                         proj_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        with st.spinner("Descargando vídeo..."):
-                            v_path = descargar_video(url_input, proj_id)
-                        with st.spinner("Extrayendo audio ligero para la IA..."):
-                            a_path = extraer_audio(v_path, proj_id, min_ini, min_fin)
+                        with st.spinner("Obteniendo stream y extrayendo audio ligero en vivo..."):
+                            stream_url = obtener_stream_directo_url(url_input.strip())
+                            a_path = extraer_audio(stream_url, proj_id, min_ini, min_fin)
                         st.session_state["proj_id"] = proj_id
-                        st.session_state["video_path"] = v_path
+                        st.session_state["video_path"] = stream_url
                         st.session_state["audio_path"] = a_path
                         st.session_state["offset_seg"] = min_ini * 60
-                        st.session_state["nombre_proyecto"] = f"Video {proj_id}"
+                        st.session_state["nombre_proyecto"] = f"Stream {proj_id}"
                         st.session_state.pop("clips_encontrados", None)
-                        st.success("¡Vídeo listo! Ahora configura el Paso 2 abajo.")
+                        st.success("¡Stream conectado y audio listo sin descargar el vídeo completo! Configura el Paso 2 abajo.")
                     except Exception as e:
                         st.error(str(e))
 
@@ -1764,7 +2199,7 @@ if pagina == "💬 Inicio (Chat IA)":
             if st.button("🚀 Buscar momentos con IA", type="primary", use_container_width=True):
                 try:
                     t0 = time.time()
-                    with st.spinner("⚡ Analizando vídeo y detectando los mejores clips…"):
+                    with st.spinner("⚡ Analizando audio y detectando los mejores clips…"):
                         clips, motor_usado = buscar_momentos_ia(
                             st.session_state["audio_path"],
                             instruccion,
@@ -1792,94 +2227,26 @@ if pagina == "💬 Inicio (Chat IA)":
 
     # --- PASO 3 ---
     if "clips_encontrados" in st.session_state:
-        st.markdown('<span class="step-pill">PASO 3 · RESULTADOS</span>', unsafe_allow_html=True)
-        st.markdown("### Tus clips sugeridos")
-
-        for i, clip in enumerate(st.session_state["clips_encontrados"]):
-            with st.expander(f"🎬 Clip #{i+1}: {clip['titulo']}  ·  🔥 {clip['puntaje_viral']}/100", expanded=True):
-                col_info, col_render = st.columns([1.8, 1.2])
-                with col_info:
-                    st.markdown(f'<span class="viral-badge">🔥 Viralidad {clip["puntaje_viral"]}/100</span>', unsafe_allow_html=True)
-                    st.write(f"**Por qué funciona:** {clip['motivo']}")
-
-                    if es_pro:
-                        if clip.get("gancho_visual"):
-                            st.markdown(f"**🎯 Gancho visual sugerido:** `{clip['gancho_visual']}`")
-                        st.info(f"**Magic Post (Copy para TikTok / YouTube):**\n\n{clip['descripcion_redes']}")
-
-                        t1, t2 = st.columns(2)
-                        inicio = t1.number_input("Inicio (seg)", value=float(clip["start"]), key=f"start_{i}")
-                        fin = t2.number_input("Fin (seg)", value=float(clip["end"]), key=f"end_{i}")
-
-                        o1, o2 = st.columns(2)
-                        layout_clip = o1.selectbox("📐 Encuadre", LAYOUTS_VIDEO, index=0, key=f"lay_{i}")
-                        calidad_clip = o2.selectbox("📺 Calidad de descarga", ["HD (720p)", "Full HD (1080p)"], index=1, key=f"cal_{i}")
-
-                        s1, s2, s3 = st.columns(3)
-                        usar_sub = s1.checkbox("💬 Con subtítulos", value=True, key=f"usub_{i}")
-                        color_nombre = s2.selectbox("🎨 Color subtítulos", list(COLORES_SUBTITULOS.keys()), index=0, key=f"col_{i}")
-                        tamano_sub = s3.slider("🔠 Tamaño letra", 14, 28, 20, key=f"tam_{i}")
-                        color_ass = COLORES_SUBTITULOS[color_nombre]
-                    else:
-                        inicio = float(clip["start"])
-                        fin = float(clip["end"])
-                        layout_clip = "Pantalla completa (9:16)"
-                        calidad_clip = "480p (Free)"
-                        usar_sub = False
-                        color_ass = "&H00FFFFFF"
-                        tamano_sub = 18
-                        st.caption("🔒 Recorte manual, reencuadre, subtítulos de colores/tamaño y descarga HD/Full HD sin marca de agua están disponibles desde el **Plan Pro**.")
-
-                with col_render:
-                    proj_id = st.session_state.get("proj_id", "local")
-                    out_file = str(CLIPS_DIR / f"{proj_id}_clip_{i+1}.mp4")
-
-                    if st.button(f"✂️ Crear Clip #{i+1}", type="primary", use_container_width=True, key=f"render_{i}"):
-                        try:
-                            with st.spinner("Renderizando clip…"):
-                                srt_temp = None
-                                if usar_sub and clip.get("subtitulos"):
-                                    srt_temp = str(WORK_DIR / f"temp_sub_{i+1}.srt")
-                                    generar_srt_clip(clip["subtitulos"], srt_temp)
-
-                                renderizar_clip(
-                                    st.session_state["video_path"],
-                                    inicio, fin, out_file,
-                                    layout=layout_clip,
-                                    usar_subtitulos=usar_sub,
-                                    color_sub=color_ass,
-                                    tamano_sub=tamano_sub,
-                                    srt_filename=srt_temp,
-                                    calidad=calidad_clip,
-                                    con_marca_agua=(not es_pro)
-                                )
-                                if srt_temp and os.path.exists(srt_temp):
-                                    os.remove(srt_temp)
-                            st.success("¡Clip listo!")
-                        except Exception as e:
-                            st.error(str(e))
-
-                    if os.path.exists(out_file):
-                        st.video(out_file)
-                        etiqueta_dl = f"⬇️ Descargar {calidad_clip}" if es_pro else "⬇️ Descargar (con marca de agua)"
-                        with open(out_file, "rb") as f:
-                            st.download_button(
-                                label=etiqueta_dl,
-                                data=f,
-                                file_name=f"clip_{i+1}_{proj_id}.mp4",
-                                mime="video/mp4",
-                                use_container_width=True,
-                                key=f"dl_{i}"
-                            )
+        ui_resultados(
+            st,
+            st.session_state["clips_encontrados"],
+            st.session_state["video_path"],
+            st.session_state.get("proj_id", "local"),
+            CLIPS_DIR,
+            WORK_DIR,
+            es_pro,
+            user_config,
+            lambda: guardar_json(USER_CONFIG_FILE, user_config)
+        )
 
 # ==============================================================================
-# PÁGINA 2: EDITOR DE VIDEO (VISTA PREVIA EN VIVO) + TÍTULOS IA + REDES
+# PÁGINA 2: EDITOR DE VIDEO (VISTA PREVIA EN VIVO) + SUBTÍTULOS + REDES
 # ==============================================================================
 elif pagina == "✂️ Editor y Redes":
     st.markdown("""
     <div class="hero-box">
         <div class="hero-title">Editor Studio & Publicación 🎵</div>
-        <div class="hero-sub">Recorta, quema ganchos visuales, genera Títulos IA y publica en TikTok y YouTube.</div>
+        <div class="hero-sub">Recorta, ajusta brillo/contraste en vivo, genera y mueve subtítulos, y publica en tus redes.</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1888,9 +2255,10 @@ elif pagina == "✂️ Editor y Redes":
             st.warning("🔒 **Función disponible desde el Plan Pro**")
             st.markdown("""
             Con **Plan Pro** o **Super Pro** desbloqueas:
-            - ✂️ Editor avanzado (recortar, velocidad, brillo, contraste y gancho visual)
-            - ✨ Generador automático de **5 Títulos Virales + Descripción + Hashtags con IA**
-            - 🚀 Publicación en **TikTok y YouTube** con el texto ya escrito
+- ✂️ Editor avanzado (recortar, velocidad, brillo y contraste con vista previa en vivo)
+- 💬 Generador de subtítulos con posición libre, tamaño, tipografía y descarga `.SRT`
+- ✨ Generador automático de **5 Títulos Virales + Descripción + Hashtags con IA**
+- 🚀 Publicación en **TikTok y YouTube** con el texto ya escrito
             """)
             if st.button("💎 Ver Planes Pro / Super Pro", type="primary"):
                 st.session_state["pagina_actual"] = "💎 Planes / Key"
@@ -1919,6 +2287,12 @@ elif pagina == "✂️ Editor y Redes":
     if video_elegido and os.path.exists(video_elegido):
         dur_total = obtener_duracion_video(video_elegido)
 
+        st.session_state.setdefault("sub_x_pct", 50)
+        st.session_state.setdefault("sub_y_pct", 82)
+        st.session_state.setdefault("sub_tam_val", 22)
+        st.session_state.setdefault("sub_fuente_val", list(FUENTES_SUBTITULOS.keys())[0])
+        st.session_state.setdefault("sub_color_val", "Amarillo viral")
+
         with st.container(border=True):
             st.markdown('<span class="step-pill">IA AUTOMÁTICA · GANCHO Y TÍTULOS</span>', unsafe_allow_html=True)
             st.markdown("### Que la IA escuche tu clip y cree el Gancho + Títulos")
@@ -1937,86 +2311,237 @@ elif pagina == "✂️ Editor y Redes":
                     st.error(str(e))
 
         with st.container(border=True):
-            st.markdown('<span class="step-pill">EDITOR DE VIDEO</span>', unsafe_allow_html=True)
-            col_prev, col_edit = st.columns([1, 1.4])
+            st.markdown('<span class="step-pill">EDITOR DE VIDEO Y SUBTÍTULOS</span>', unsafe_allow_html=True)
+            col_prev, col_edit = st.columns([1.05, 1.45])
 
             with col_edit:
-                st.markdown("#### 🎛️ Ajustes antes de subir")
-                r1, r2 = st.columns(2)
-                ed_ini = r1.number_input("Recortar inicio (seg)", min_value=0.0, max_value=dur_total, value=0.0, step=0.5, key="ed_ini_val")
-                ed_fin = r2.number_input("Recortar fin (seg)", min_value=0.5, max_value=dur_total, value=dur_total, step=0.5, key="ed_fin_val")
+                tab_ed_video, tab_ed_subs = st.tabs(["🎛️ Video, Brillo y Contraste", "💬 Subtítulos, Posición y Letras"])
 
-                e1, e2, e3 = st.columns(3)
-                velocidad = e1.select_slider("Velocidad", options=[0.75, 1.0, 1.25, 1.5, 2.0], value=1.0, key="ed_vel_val")
-                volumen = e2.slider("Volumen", 0.0, 2.0, 1.0, 0.1, key="ed_vol_val")
-                contraste = e3.slider("Contraste", 0.5, 1.8, 1.0, 0.05, key="ed_con_val")
+                with tab_ed_video:
+                    r1, r2 = st.columns(2)
+                    ed_ini = r1.number_input("Recortar inicio (seg)", min_value=0.0, max_value=dur_total, value=0.0, step=0.5, key="ed_ini_val")
+                    ed_fin = r2.number_input("Recortar fin (seg)", min_value=0.5, max_value=dur_total, value=dur_total, step=0.5, key="ed_fin_val")
 
-                brillo = st.slider("Brillo", -0.3, 0.3, 0.0, 0.02, key="ed_bri_val")
-                texto_hook = st.text_input(
-                    "🎯 Texto Gancho (Hook) arriba del video:",
-                    value=st.session_state.get("hook_auto", ""),
-                    placeholder="Presiona el botón de IA arriba o escribe tu propio gancho...",
-                    key="ed_hook_val"
-                )
+                    e1, e2 = st.columns(2)
+                    velocidad = e1.select_slider("Velocidad", options=[0.75, 1.0, 1.25, 1.5, 2.0], value=1.0, key="ed_vel_val")
+                    volumen = e2.slider("Volumen", 0.0, 2.0, 1.0, 0.1, key="ed_vol_val")
 
-                btn_rapido, btn_full = st.columns(2)
-                if btn_rapido.button("⚡ Probar muestra (5s)", use_container_width=True):
-                    try:
-                        muestra_path = str(EDITED_DIR / f"muestra_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
-                        fin_muestra = min(ed_fin, ed_ini + 5.0)
-                        with st.spinner("Generando muestra rápida de 5s..."):
-                            editar_video_ffmpeg(
-                                video_elegido, muestra_path, ed_ini, fin_muestra,
-                                velocidad, volumen, brillo, contraste, texto_hook
-                            )
-                        st.session_state["video_editado_actual"] = muestra_path
+                    b_col, c_col = st.columns(2)
+                    brillo = b_col.slider("☀️ Brillo (en vivo)", -0.5, 0.5, 0.0, 0.02, key="ed_bri_val")
+                    contraste = c_col.slider("🌗 Contraste (en vivo)", 0.4, 2.0, 1.0, 0.05, key="ed_con_val")
+
+                    texto_hook = st.text_input(
+                        "🎯 Texto Gancho (Hook) arriba del video:",
+                        value=st.session_state.get("hook_auto", ""),
+                        placeholder="Escribe un gancho o genéralo con IA arriba...",
+                        key="ed_hook_val"
+                    )
+
+                    btn_rapido, btn_full = st.columns(2)
+                    if btn_rapido.button("⚡ Probar muestra (5s)", use_container_width=True):
+                        try:
+                            muestra_path = str(EDITED_DIR / f"muestra_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
+                            fin_muestra = min(ed_fin, ed_ini + 5.0)
+                            with st.spinner("Generando muestra rápida de 5s..."):
+                                editar_video_ffmpeg(
+                                    video_elegido, muestra_path, ed_ini, fin_muestra,
+                                    velocidad, volumen, brillo, contraste, texto_hook
+                                )
+                            st.session_state["video_editado_actual"] = muestra_path
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+                    if btn_full.button("✂️ Aplicar edición y quemar Gancho", type="primary", use_container_width=True):
+                        try:
+                            nombre_editado = str(EDITED_DIR / f"editado_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
+                            with st.spinner("Aplicando edición en el video..."):
+                                editar_video_ffmpeg(
+                                    video_elegido, nombre_editado, ed_ini, ed_fin,
+                                    velocidad, volumen, brillo, contraste, texto_hook
+                                )
+                            st.session_state["video_editado_actual"] = nombre_editado
+                            st.success("¡Video editado con éxito!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+                with tab_ed_subs:
+                    st.markdown("**Recetas rápidas de subtítulos:**")
+                    p_cols = st.columns(len(PRESETS_SUBTITULOS))
+                    for idx_p, (nombre_p, cfg_p) in enumerate(PRESETS_SUBTITULOS.items()):
+                        if p_cols[idx_p].button(nombre_p, key=f"preset_sub_{idx_p}", use_container_width=True):
+                            st.session_state["sub_color_val"] = cfg_p["color"]
+                            st.session_state["sub_tam_val"] = cfg_p["tamano"]
+                            st.session_state["sub_x_pct"] = cfg_p["x_pct"]
+                            st.session_state["sub_y_pct"] = cfg_p["y_pct"]
+                            st.session_state["sub_fuente_val"] = cfg_p["fuente"]
+                            st.rerun()
+
+                    g_c1, g_c2 = st.columns([1.6, 1])
+                    max_pal_sub = g_c1.slider("Palabras por bloque de subtítulo", 2, 8, 4, key="sub_max_pal_slider")
+                    with g_c2:
+                        st.write("")
+                        if st.button("🎙️ Generar subtítulos", type="primary", use_container_width=True, key="btn_generar_subs_auto"):
+                            try:
+                                with st.spinner("Transcribiendo audio y generando subtítulos..."):
+                                    subs_gen = generar_subtitulos_desde_video(video_elegido, user_config, max_palabras=max_pal_sub)
+                                st.session_state["subs_lista_ed"] = subs_gen
+                                st.session_state["subs_texto_ed"] = json.dumps(subs_gen, indent=2, ensure_ascii=False)
+                                st.success(f"¡{len(subs_gen)} subtítulos generados!")
+                            except Exception as e:
+                                st.error(str(e))
+
+                    st.divider()
+                    f_c1, f_c2, f_c3 = st.columns([1.5, 1.1, 1.1])
+                    fuente_sel = f_c1.selectbox("🔤 Tipo de letra", list(FUENTES_SUBTITULOS.keys()), key="sub_fuente_val")
+                    color_sel = f_c2.selectbox("🎨 Color", list(COLORES_SUBTITULOS.keys()), key="sub_color_val")
+                    tamano_sel = f_c3.slider("🔍 Agrandar / Achicar", 12, 42, key="sub_tam_val")
+
+                    st.markdown("**📍 Mover subtítulo en el video:**")
+                    at_1, at_2, at_3 = st.columns(3)
+                    if at_1.button("⬆️ Arriba", key="pos_arriba", use_container_width=True):
+                        st.session_state["sub_y_pct"] = 18
                         st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
-
-                if btn_full.button("✂️ Aplicar edición y quemar Gancho", type="primary", use_container_width=True):
-                    try:
-                        nombre_editado = str(EDITED_DIR / f"editado_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
-                        with st.spinner("Aplicando edición en Full HD..."):
-                            editar_video_ffmpeg(
-                                video_elegido, nombre_editado, ed_ini, ed_fin,
-                                velocidad, volumen, brillo, contraste, texto_hook
-                            )
-                        st.session_state["video_editado_actual"] = nombre_editado
-                        st.success("¡Video editado con éxito! Ya se actualiza en la vista previa.")
+                    if at_2.button("⏺️ Centro", key="pos_centro", use_container_width=True):
+                        st.session_state["sub_y_pct"] = 50
                         st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
+                    if at_3.button("⬇️ Abajo", key="pos_abajo", use_container_width=True):
+                        st.session_state["sub_y_pct"] = 82
+                        st.rerun()
+
+                    pos_c1, pos_c2 = st.columns(2)
+                    x_pct_sel = pos_c1.slider("Horizontal (Izq ↔ Der %)", 10, 90, key="sub_x_pct")
+                    y_pct_sel = pos_c2.slider("Vertical (Arriba ↕ Abajo %)", 10, 90, key="sub_y_pct")
+
+                    texto_sub_prueba = st.text_input(
+                        "Texto de muestra en vista previa:",
+                        value=(st.session_state.get("subs_lista_ed", [{}])[0].get("text") if st.session_state.get("subs_lista_ed") else "ASÍ SE VERÁ TU SUBTÍTULO"),
+                        key="sub_muestra_txt"
+                    )
+
+                    if "subs_texto_ed" in st.session_state:
+                        subs_json_raw = st.text_area(
+                            "Editar segmentos de subtítulos (JSON):",
+                            value=st.session_state["subs_texto_ed"],
+                            height=140,
+                            key="ta_subs_editor_json"
+                        )
+                    else:
+                        subs_json_raw = None
+
+                    q_c1, q_c2 = st.columns(2)
+                    with q_c1:
+                        if st.button("🔥 Quemar subtítulos en el video", type="primary", use_container_width=True, key="btn_quemar_subs_pos"):
+                            try:
+                                if subs_json_raw:
+                                    lista_final = json.loads(subs_json_raw)
+                                    st.session_state["subs_texto_ed"] = subs_json_raw
+                                    st.session_state["subs_lista_ed"] = lista_final
+                                elif texto_sub_prueba.strip():
+                                    lista_final = [{"start": 0.0, "end": max(1.0, dur_total), "text": texto_sub_prueba.strip()}]
+                                else:
+                                    raise Exception("Genera subtítulos o escribe un texto primero.")
+
+                                salida_sub_vid = str(EDITED_DIR / f"subtitulado_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
+                                with st.spinner("Quemando subtítulos con posición y estilo en el video..."):
+                                    quemar_subtitulos_en_video(
+                                        video_elegido,
+                                        salida_sub_vid,
+                                        lista_final,
+                                        fuente_nombre=fuente_sel,
+                                        tamano=tamano_sel,
+                                        color_ass=COLORES_SUBTITULOS[color_sel],
+                                        x_pct=x_pct_sel,
+                                        y_pct=y_pct_sel
+                                    )
+                                st.session_state["video_editado_actual"] = salida_sub_vid
+                                st.success("¡Subtítulos quemados en el video!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"No se pudieron quemar los subtítulos: {e}")
+
+                    with q_c2:
+                        if subs_json_raw:
+                            try:
+                                datos_srt = json.loads(subs_json_raw)
+                                ruta_srt_dl = str(WORK_DIR / f"subtitulos_{USER_HASH}.srt")
+                                generar_srt_clip(datos_srt, ruta_srt_dl)
+                                with open(ruta_srt_dl, "rb") as f_srt:
+                                    st.download_button(
+                                        "⬇️ Descargar .SRT",
+                                        data=f_srt,
+                                        file_name=f"{Path(video_elegido).stem}.srt",
+                                        mime="text/plain",
+                                        use_container_width=True,
+                                        key="btn_descargar_srt_editor"
+                                    )
+                            except Exception:
+                                st.caption("Revisa la sintaxis del JSON para descargar .SRT.")
 
             with col_prev:
-                st.markdown("#### 📺 Vista previa")
+                st.markdown("#### 📺 Vista previa en vivo")
                 video_a_mostrar = st.session_state.get("video_editado_actual", video_elegido)
                 if not os.path.exists(video_a_mostrar):
                     video_a_mostrar = video_elegido
 
-                css_brillo = 1.0 + (brillo * 1.8)
+                ass_hex = COLORES_SUBTITULOS.get(color_sel, "&H0000FFFF").replace("&H", "").strip()
+                if len(ass_hex) == 8:
+                    hex_css = f"#{ass_hex[6:8]}{ass_hex[4:6]}{ass_hex[2:4]}"
+                else:
+                    hex_css = "#facc15"
+
+                css_brillo = max(0.1, 1.0 + (brillo * 1.4))
                 filtro_css = f"brightness({css_brillo:.2f}) contrast({contraste:.2f})"
-                hook_html = ""
+                font_css = FUENTES_SUBTITULOS.get(fuente_sel, "Arial Black")
+                tam_preview_px = max(12, int(round(tamano_sel * 0.95)))
+
+                hook_overlay_html = ""
                 if texto_hook.strip():
-                    hook_html = f"""
+                    hook_overlay_html = f"""
                     <div style="
-                        position:absolute; top:14%; left:50%; transform:translateX(-50%);
-                        z-index:10; background:rgba(0,0,0,0.78); color:#facc15;
-                        padding:8px 16px; border-radius:10px; font-weight:800;
-                        font-size:1.05rem; text-align:center; max-width:90%;
-                        box-shadow:0 4px 16px rgba(0,0,0,0.6); pointer-events:none;
+                        position:absolute; top:8%; left:50%; transform:translateX(-50%);
+                        z-index:12; background:rgba(0,0,0,0.78); color:#facc15;
+                        padding:6px 14px; border-radius:10px; font-weight:800;
+                        font-size:0.95rem; text-align:center; max-width:90%;
+                        pointer-events:none;
                     ">{texto_hook.strip()}</div>
+                    """
+
+                sub_overlay_html = ""
+                if texto_sub_prueba.strip():
+                    sub_overlay_html = f"""
+                    <div style="
+                        position:absolute; left:{x_pct_sel}%; top:{y_pct_sel}%;
+                        transform:translate(-50%, -50%);
+                        z-index:15; color:{hex_css}; font-family:'{font_css}', sans-serif;
+                        font-size:{tam_preview_px}px; font-weight:800;
+                        text-shadow: 0 2px 6px rgba(0,0,0,0.95), 0 0 2px #000;
+                        text-align:center; max-width:88%; line-height:1.15;
+                        pointer-events:none;
+                    ">{texto_sub_prueba.strip()}</div>
                     """
 
                 st.markdown(f"""
                 <style>
-                    .live-video-wrap video {{
+                    .preview-stage-{USER_HASH} {{
+                        position: relative;
+                        width: 100%;
+                        border-radius: 14px;
+                        overflow: hidden;
+                        background: #05050a;
+                        border: 1px solid rgba(139, 92, 246, 0.35);
+                    }}
+                    .preview-stage-{USER_HASH} video {{
+                        width: 100% !important;
+                        display: block;
                         filter: {filtro_css} !important;
-                        transition: filter 0.15s ease;
+                        transition: filter 0.12s ease;
                     }}
                 </style>
-                <div class="live-video-wrap" style="position:relative;">
-                    {hook_html}
+                <div class="preview-stage-{USER_HASH}">
+                    {hook_overlay_html}
+                    {sub_overlay_html}
                 """, unsafe_allow_html=True)
 
                 if video_a_mostrar == video_elegido and (ed_ini > 0 or ed_fin < dur_total):
@@ -2025,7 +2550,10 @@ elif pagina == "✂️ Editor y Redes":
                     st.video(video_a_mostrar)
 
                 st.markdown("</div>", unsafe_allow_html=True)
-                st.caption(f"Rango: {ed_ini:.1f}s – {ed_fin:.1f}s · Vel: {velocidad}x · Vol: {volumen:.1f}x")
+                st.caption(
+                    f"Brillo: {brillo:+.2f} · Contraste: {contraste:.2f} · "
+                    f"Subtítulo en ({x_pct_sel}%, {y_pct_sel}%) · Tamaño {tamano_sel}"
+                )
 
         with st.container(border=True):
             st.markdown('<span class="step-pill">PUBLICAR EN TIKTOK Y YOUTUBE</span>', unsafe_allow_html=True)
@@ -2054,9 +2582,9 @@ elif pagina == "✂️ Editor y Redes":
                         use_container_width=True
                     )
             with b2:
-                st.link_button("🎵 Publicar en TikTok Studio", "https://www.tiktok.com/tiktokstudio/upload", use_container_width=True)
+                st.link_button("🎵 Publicar en TikTok Studio", "[https://www.tiktok.com/tiktokstudio/upload](https://www.tiktok.com/tiktokstudio/upload)", use_container_width=True)
             with b3:
-                st.link_button("▶️ Publicar en YouTube Studio", "https://studio.youtube.com/channel/UC/videos/upload", use_container_width=True)
+                st.link_button("▶️ Publicar en YouTube Studio", "[https://studio.youtube.com/channel/UC/videos/upload](https://studio.youtube.com/channel/UC/videos/upload)", use_container_width=True)
 
             with st.expander("🔌 Opcional: Subida directa a TikTok por API"):
                 tk_tok = st.text_input("Tu TikTok Access Token:", value=user_config.get("tiktok_token", ""), type="password")
@@ -2089,9 +2617,9 @@ elif pagina == "📈 Tendencias TikTok":
             st.warning("🔒 **Función exclusiva del Plan SUPER PRO**")
             st.markdown("""
             Sube al **Plan Super Pro** para desbloquear:
-            - 🔎 **Buscador de Tendencias en Vivo (Groq / DeepSeek / Gemini / OpenAI):** qué temas, formatos y ganchos explotan HOY en tu nicho y país.
-            - 🧬 **Clonador de Fórmula Viral:** pega el link de cualquier TikTok viral, extrae su gancho de 3 segundos, ritmo y CTA, y úsalo como molde en tus propios videos con un clic.
-            - 🎞️ Hasta **10 clips** por video.
+- 🔎 **Buscador de Tendencias en Vivo (Groq / DeepSeek / Gemini / OpenAI):** qué temas, formatos y ganchos explotan HOY en tu nicho y país.
+- 🧬 **Clonador de Fórmula Viral:** pega el link de cualquier TikTok viral, extrae su gancho de 3 segundos, ritmo y CTA, y úsalo como molde en tus propios videos con un clic.
+- 🎞️ Hasta **10 clips** por video.
             """)
             if st.button("🚀 Subir a Plan Super Pro", type="primary"):
                 st.session_state["pagina_actual"] = "💎 Planes / Key"
@@ -2134,14 +2662,14 @@ elif pagina == "📈 Tendencias TikTok":
         with st.container(border=True):
             st.markdown('<span class="step-pill">INGENIERÍA INVERSA VIRAL</span>', unsafe_allow_html=True)
             st.markdown("### Clona la fórmula de un TikTok en tendencia")
-            url_tk = st.text_input("🔗 Pega el link del TikTok viral aquí:", placeholder="https://www.tiktok.com/@usuario/video/...")
+            url_tk = st.text_input("🔗 Pega el link del TikTok viral aquí:", placeholder="[https://www.tiktok.com/@usuario/video/](https://www.tiktok.com/@usuario/video/)...")
 
             if st.button("🧬 Analizar y extraer fórmula viral", type="primary", use_container_width=True):
                 if not url_tk.strip():
                     st.warning("Pega un enlace de TikTok primero.")
                 else:
                     try:
-                        with st.spinner("⚡ Descargando TikTok y extrayendo fórmula viral..."):
+                        with st.spinner("⚡ Conectando al stream de TikTok y extrayendo fórmula viral..."):
                             formula, motor_usado = clonar_formula_viral_ia(url_tk.strip())
                             st.session_state["formula_clonada"] = formula
                         st.success(f"¡Fórmula viral extraída con **{motor_usado}**!")
@@ -2153,8 +2681,8 @@ elif pagina == "📈 Tendencias TikTok":
             with st.container(border=True):
                 col_v, col_f = st.columns([1, 1.6])
                 with col_v:
-                    if f.get("video_path") and os.path.exists(f["video_path"]):
-                        st.video(f["video_path"])
+                    if f.get("stream_url"):
+                        st.video(f["stream_url"])
                 with col_f:
                     st.markdown(f"**🎣 Gancho (primeros 3 seg):** {f.get('gancho_3s', '')}")
                     st.markdown(f"**⚡ Ritmo y cortes:** {f.get('ritmo_cortes', '')}")
@@ -2445,7 +2973,7 @@ elif pagina == "💎 Planes / Key":
             )
             st.link_button(
                 "📲 Enviar captura de Yape por WhatsApp",
-                f"https://wa.me/{YAPE_WHATSAPP}?text={msg_wa}",
+                f"[https://wa.me/](https://wa.me/){YAPE_WHATSAPP}?text={msg_wa}",
                 use_container_width=True
             )
 
