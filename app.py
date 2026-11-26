@@ -23,10 +23,13 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CONFIGURACIÓN DE ADMIN PRINCIPAL Y YAPE ---
+# --- CONFIGURACIÓN DE ADMIN, YAPE Y ACTUALIZACIONES ---
 ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]
 YAPE_NUMERO = "+51 953 027 160"
 YAPE_WHATSAPP = "51953027160"
+VERSION_ACTUAL = "1.3.1"
+URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
+MODELOS_GEMINI = ["gemini-3.8-flash", "gemini-2.5-flash"]
 
 # --- ESTILO VISUAL PREMIUM (NEXUS STUDIO VIBRANT DARK + NEON GLASS) ---
 st.markdown("""
@@ -269,6 +272,51 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
+# SISTEMA DE ACTUALIZACIONES AUTOMÁTICAS
+# ==============================================================================
+def revisar_actualizacion():
+    if "update_checked" in st.session_state:
+        return
+    st.session_state["update_checked"] = True
+    try:
+        req = urllib.request.Request(URL_VERSION_JSON, headers={"Cache-Control": "no-cache"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if data.get("version") and data["version"] != VERSION_ACTUAL:
+                st.session_state["nueva_version"] = data
+    except Exception:
+        pass
+
+@st.dialog("🚀 ¡Nueva versión disponible!")
+def mostrar_popup_actualizacion(info):
+    st.markdown(f"Tu versión actual: **`v{VERSION_ACTUAL}`** → Nueva versión: **`v{info['version']}`**")
+    if info.get("notas"):
+        st.info(f"**Novedades:** {info['notas']}")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("⬇️ Actualizar ahora", type="primary", use_container_width=True):
+            try:
+                with st.spinner("Descargando e instalando actualización..."):
+                    with urllib.request.urlopen(info["url_codigo"], timeout=10) as resp:
+                        nuevo_codigo = resp.read().decode("utf-8")
+                    Path(__file__).write_text(nuevo_codigo, encoding="utf-8")
+                st.success("¡Actualizado! Recargando programa...")
+                del st.session_state["nueva_version"]
+                time.sleep(1.5)
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo actualizar: {e}")
+    with col2:
+        if st.button("Más tarde", use_container_width=True):
+            del st.session_state["nueva_version"]
+            st.rerun()
+
+revisar_actualizacion()
+if "nueva_version" in st.session_state:
+    mostrar_popup_actualizacion(st.session_state["nueva_version"])
+
+# ==============================================================================
 # BASE DE DATOS: USUARIOS, PLANES (FREE / PRO / SUPER_PRO), ROLES ADMIN Y KEYS
 # ==============================================================================
 def init_db():
@@ -370,7 +418,6 @@ def verificar_login(email: str, password: str) -> bool:
     return valido
 
 def obtener_estado_plan(email: str):
-    """Retorna (nivel: 'FREE'|'PRO'|'SUPER_PRO', texto_legible: str)"""
     if es_admin(email):
         return "SUPER_PRO", "ADMIN SUPER PRO"
     conn = sqlite3.connect("usuarios.db")
@@ -635,6 +682,24 @@ proyectos = cargar_json(PROJECTS_FILE, [])
 def obtener_gemini_key_usuario() -> str:
     return user_config.get("api_key", "").strip()
 
+# --- HELPER GEMINI CON REINTENTOS Y MODELO DE RESPALDO (EVITA ERROR 503) ---
+def llamar_gemini_seguro(client, contents, config=None):
+    ultimo_error = None
+    for modelo in MODELOS_GEMINI:
+        for intento in range(2):
+            try:
+                if config is not None:
+                    return client.models.generate_content(model=modelo, contents=contents, config=config)
+                return client.models.generate_content(model=modelo, contents=contents)
+            except Exception as e:
+                ultimo_error = e
+                err_txt = str(e)
+                if "503" in err_txt or "UNAVAILABLE" in err_txt or "429" in err_txt:
+                    time.sleep(3)
+                    continue
+                break
+    raise Exception(f"Los servidores de Gemini están con mucha demanda en este momento. Intenta de nuevo en 10 segundos. ({ultimo_error})")
+
 # --- COLORES Y LAYOUTS ---
 COLORES_SUBTITULOS = {
     "Amarillo viral": "&H0000FFFF",
@@ -735,30 +800,20 @@ def buscar_momentos_ia(api_key: str, audio_path: str, instruccion_usuario: str, 
   - "subtitulos": lista de frases cortas (3 a 5 palabras) dentro del clip, cada una con "start" (relativo desde 0.0), "end" (relativo) y "text".
     """
 
-    response = None
-    for intento in range(3):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=[audio_file, prompt],
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            break
-        except Exception as e:
-            if "503" in str(e) and intento < 2:
-                time.sleep(5)
-            else:
-                try:
-                    client.files.delete(name=audio_file.name)
-                except Exception:
-                    pass
-                st.error(f"Error con Gemini (revisa tu API Key o intenta en unos segundos): {e}")
-                st.stop()
-
     try:
-        client.files.delete(name=audio_file.name)
-    except Exception:
-        pass
+        response = llamar_gemini_seguro(
+            client,
+            [audio_file, prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+    finally:
+        try:
+            client.files.delete(name=audio_file.name)
+        except Exception:
+            pass
 
     clips = json.loads(response.text)["clips"]
     if offset_seg > 0:
@@ -788,32 +843,22 @@ def analizar_clip_para_redes_ia(api_key: str, video_path: str, tono: str, contex
 - "hashtags": cadena con 5 a 8 hashtags relevantes y de alto alcance.
     """
 
-    response = None
-    for intento in range(3):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=[audio_file, prompt],
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            break
-        except Exception as e:
-            if "503" in str(e) and intento < 2:
-                time.sleep(4)
-            else:
-                try:
-                    client.files.delete(name=audio_file.name)
-                except Exception:
-                    pass
-                st.error(f"Error al analizar el clip con IA: {e}")
-                st.stop()
-
     try:
-        client.files.delete(name=audio_file.name)
-        if os.path.exists(audio_temp):
-            os.remove(audio_temp)
-    except Exception:
-        pass
+        response = llamar_gemini_seguro(
+            client,
+            [audio_file, prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+    finally:
+        try:
+            client.files.delete(name=audio_file.name)
+            if os.path.exists(audio_temp):
+                os.remove(audio_temp)
+        except Exception:
+            pass
 
     return json.loads(response.text)
 
@@ -833,20 +878,21 @@ def buscar_tendencias_tiktok_ia(api_key: str, nicho: str, region: str, detalle_e
     4. **🤖 Prompt listo para copiar en el Chat IA** (una instrucción exacta para buscar momentos así en un video largo).
     """
     try:
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
+        response = llamar_gemini_seguro(
+            client,
+            prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())]
             )
         )
         return response.text
     except Exception:
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt
-        )
-        return response.text
+        try:
+            response = llamar_gemini_seguro(client, prompt)
+            return response.text
+        except Exception as e:
+            st.error(str(e))
+            st.stop()
 
 def clonar_formula_viral_ia(api_key: str, tiktok_url: str):
     proj_id = f"clon_{datetime.now().strftime('%H%M%S')}"
@@ -875,32 +921,22 @@ def clonar_formula_viral_ia(api_key: str, tiktok_url: str):
 - "guion_estructura": plantilla breve de 4 pasos (Gancho -> Desarrollo -> Giro -> Cierre) para crear un video o título similar.
     """
 
-    response = None
-    for intento in range(3):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=[audio_file, prompt],
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            break
-        except Exception as e:
-            if "503" in str(e) and intento < 2:
-                time.sleep(4)
-            else:
-                try:
-                    client.files.delete(name=audio_file.name)
-                except Exception:
-                    pass
-                st.error(f"Error al analizar la fórmula con IA: {e}")
-                st.stop()
-
     try:
-        client.files.delete(name=audio_file.name)
-        if os.path.exists(a_path):
-            os.remove(a_path)
-    except Exception:
-        pass
+        response = llamar_gemini_seguro(
+            client,
+            [audio_file, prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+    finally:
+        try:
+            client.files.delete(name=audio_file.name)
+            if os.path.exists(a_path):
+                os.remove(a_path)
+        except Exception:
+            pass
 
     datos = json.loads(response.text)
     datos["video_path"] = v_path
@@ -1087,7 +1123,6 @@ def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
 # --- BARRA DE NAVEGACIÓN SUPERIOR SIEMPRE VISIBLE ---
 opciones_menu = ["💬 Inicio (Chat IA)", "✂️ Editor y Redes", "📈 Tendencias TikTok", "📁 Mis Proyectos"]
 
-# Solo mostrar "Planes / Key" si el usuario aún NO tiene Super Pro (y no es Admin)
 if not es_super_pro and not usuario_es_admin:
     opciones_menu.append("💎 Planes / Key")
 
@@ -1114,11 +1149,12 @@ if nav_cols[-1].button("🚪 Salir", key="top_nav_logout", use_container_width=T
         del st.session_state[k]
     st.rerun()
 
-# --- BARRA LATERAL (CON GEMINI API KEY PROPIA DE CADA USUARIO) ---
+# --- BARRA LATERAL (CON GEMINI API KEY PROPIA Y BUSCAR ACTUALIZACIONES ABAJO) ---
 total_clips_creados = len(list(CLIPS_DIR.glob("*.mp4"))) + len(list(EDITED_DIR.glob("*.mp4")))
 
 with st.sidebar:
     st.markdown('<div class="brand-logo">⚡ Mi Clipper IA</div>', unsafe_allow_html=True)
+    st.caption(f"Studio Pro · v{VERSION_ACTUAL}")
     st.caption(f"👤 {st.session_state['usuario']}")
     if es_super_pro:
         st.success(f"🚀 {texto_plan}")
@@ -1156,6 +1192,15 @@ with st.sidebar:
                 st.session_state["ir_a_resultados"] = True
                 st.session_state["pagina_actual"] = "💬 Inicio (Chat IA)"
                 st.rerun()
+
+    st.divider()
+    if st.button("🔄 Buscar actualizaciones", use_container_width=True):
+        st.session_state.pop("update_checked", None)
+        revisar_actualizacion()
+        if "nueva_version" in st.session_state:
+            st.rerun()
+        else:
+            st.toast(f"Ya tienes la última versión (v{VERSION_ACTUAL}).", icon="✅")
 
 pagina = st.session_state["pagina_actual"]
 
