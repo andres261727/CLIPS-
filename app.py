@@ -28,7 +28,7 @@ st.set_page_config(
 ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]
 YAPE_NUMERO = "+51 953 027 160"
 YAPE_WHATSAPP = "51953027160"
-VERSION_ACTUAL = "1.4.6"
+VERSION_ACTUAL = "1.4.8"
 URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
 MODELOS_GEMINI = ["gemini-3.8-flash"]
 
@@ -268,6 +268,17 @@ st.markdown("""
         border-radius: 16px;
         padding: 1.1rem;
         text-align: center;
+    }
+    .beta-badge {
+        display: inline-block;
+        background: rgba(6, 182, 212, 0.18);
+        color: #38bdf8;
+        border: 1px solid rgba(56, 189, 248, 0.45);
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        margin-left: 4px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -696,29 +707,40 @@ user_config = cargar_json(USER_CONFIG_FILE, {})
 proyectos = cargar_json(PROJECTS_FILE, [])
 
 # ==============================================================================
-# MOTORES IA: ANTI-413 (AUTO-COMPACTACIÓN DE TRANSCRIPCIÓN + MODELOS LAMA)
+# SKILLS DE AGENTE (INSTRUCCIONES DE ESTILO / SUBAGENTE)
+# ==============================================================================
+SKILLS_DISPONIBLES = {
+    "⚡ Viral Sniper (Ganchos rápidos y retención)": "Prioriza cortes con gancho agresivo en los primeros 2 segundos, giros rápidos y frases que detienen el scroll.",
+    "🎬 Storyteller / Subagente Narrativo": "Actúa como subagente narrativo: busca arcos completos con inicio, tensión y remate claro, sin cortar ideas a medias.",
+    "🔥 Debate / Polémica / Contraste": "Enfócate en opiniones fuertes, comparaciones extremas, errores comunes y momentos que provoquen comentarios.",
+    "🎓 Educativo / Valor Directo": "Extrae explicaciones claras, pasos prácticos, datos sorprendentes y conclusiones accionables."
+}
+
+def obtener_instruccion_skill() -> str:
+    skill_sel = user_config.get("skill_ia", list(SKILLS_DISPONIBLES.keys())[0])
+    return SKILLS_DISPONIBLES.get(skill_sel, "")
+
+# ==============================================================================
+# MOTORES IA: GEMINI + GROQ + DEEPSEEK (BETA) + OPENAI
 # ==============================================================================
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-def compactar_transcripcion(transcripcion: str, max_chars: int = 15000) -> str:
-    """Si la transcripción es muy larga (evita error 413), conserva líneas clave distribuidas con timestamps."""
+def compactar_transcripcion(transcripcion: str, max_chars: int = 11500) -> str:
     if len(transcripcion) <= max_chars:
         return transcripcion
     lineas = transcripcion.splitlines()
     if len(lineas) <= 30:
         return transcripcion[:max_chars]
-
-    # Tomar muestra uniforme para conservar principio, medio y final del video
-    paso = max(1, len(lineas) // 160)
+    paso = max(1, len(lineas) // 130)
     muestra = lineas[::paso]
     texto_compacto = "\n".join(muestra)
     if len(texto_compacto) > max_chars:
         texto_compacto = texto_compacto[:max_chars]
     return texto_compacto + "\n[...transcripción compactada para mantener velocidad y límite de tokens...]"
 
-def obtener_modelo_groq_disponible(api_key: str) -> str:
-    if st.session_state.get("groq_modelo_cache"):
-        return st.session_state["groq_modelo_cache"]
+def obtener_modelos_groq_ordenados(api_key: str) -> list:
+    if st.session_state.get("groq_modelos_lista"):
+        return st.session_state["groq_modelos_lista"]
 
     url = "https://api.groq.com/openai/v1/models"
     req = urllib.request.Request(
@@ -726,23 +748,30 @@ def obtener_modelo_groq_disponible(api_key: str) -> str:
         headers={"Authorization": f"Bearer {api_key}", "User-Agent": BROWSER_UA},
         method="GET"
     )
+    excluidos = ("whisper", "guard", "tts", "playai", "embed", "moderation", "orpheus", "safeguard", "qwen")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         modelos = [m["id"] for m in data.get("data", []) if m.get("id")]
-        excluidos = ("whisper", "guard", "tts", "playai", "embed", "moderation", "orpheus", "safeguard", "qwen")
         chat_modelos = [m for m in modelos if not any(ex in m.lower() for ex in excluidos)]
-        for preferido in ("llama-3.1-8b-instant", "llama-3.3-70b", "llama-4", "gemma", "deepseek"):
-            for m in chat_modelos:
-                if preferido in m.lower():
-                    st.session_state["groq_modelo_cache"] = m
-                    return m
+
+        def prioridad(nombre_m: str) -> int:
+            nl = nombre_m.lower()
+            if "8b" in nl and "llama" in nl:
+                return 0
+            if "llama" in nl:
+                return 1
+            if "gemma" in nl:
+                return 2
+            return 3
+
+        chat_modelos.sort(key=prioridad)
         if chat_modelos:
-            st.session_state["groq_modelo_cache"] = chat_modelos[0]
-            return chat_modelos[0]
+            st.session_state["groq_modelos_lista"] = chat_modelos
+            return chat_modelos
     except Exception:
         pass
-    return "llama-3.1-8b-instant"
+    return []
 
 def transcribir_audio_whisper_api(audio_path: str, proveedor: str, api_key: str) -> str:
     cache = st.session_state["transcripciones_cache"]
@@ -803,54 +832,73 @@ def transcribir_audio_whisper_api(audio_path: str, proveedor: str, api_key: str)
     cache[audio_path] = resultado
     return resultado
 
-def llamar_chat_openai_compatible(proveedor: str, api_key: str, prompt: str, esperar_json: bool = False):
+def llamar_chat_openai_compatible(proveedor: str, api_key: str, prompt: str, esperar_json: bool = False, max_tokens: int = 2500):
     if proveedor == "groq":
         url = "https://api.groq.com/openai/v1/chat/completions"
-        modelo = obtener_modelo_groq_disponible(api_key)
+        candidatos = obtener_modelos_groq_ordenados(api_key)
+        if not candidatos:
+            raise Exception("No se encontraron modelos de chat activos en tu cuenta de Groq.")
+    elif proveedor == "deepseek":
+        url = "https://api.deepseek.com/chat/completions"
+        candidatos = ["deepseek-chat"]
     else:
         url = "https://api.openai.com/v1/chat/completions"
-        modelo = "gpt-4o-mini"
+        candidatos = ["gpt-4o-mini"]
 
-    payload_dict = {
-        "model": modelo,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.4,
-        "max_tokens": 2048
-    }
-    if esperar_json:
-        payload_dict["response_format"] = {"type": "json_object"}
+    ultimo_err = None
+    for idx_m, modelo in enumerate(candidatos):
+        payload_dict = {
+            "model": modelo,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.4,
+            "max_tokens": max_tokens
+        }
+        if esperar_json:
+            payload_dict["response_format"] = {"type": "json_object"}
 
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload_dict).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": BROWSER_UA
-        },
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detalle = e.read().decode("utf-8", errors="ignore")
-        raise Exception(f"HTTP {e.code}: {detalle}")
-    return data["choices"][0]["message"]["content"], modelo
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload_dict).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": BROWSER_UA
+            },
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if idx_m > 0 and proveedor == "groq":
+                st.session_state["groq_modelos_lista"] = candidatos[idx_m:] + candidatos[:idx_m]
+            return data["choices"][0]["message"]["content"], modelo
+        except urllib.error.HTTPError as e:
+            detalle = e.read().decode("utf-8", errors="ignore")
+            ultimo_err = Exception(f"HTTP {e.code} ({modelo}): {detalle}")
+            if proveedor == "groq" and e.code in (404, 413, 400):
+                continue
+            raise ultimo_err
+
+    raise ultimo_err
 
 def obtener_orden_motores():
-    preferencia = user_config.get("motor_ia", "⚡ Ultra Rápido (Groq → Gemini → OpenAI)")
+    preferencia = user_config.get("motor_ia", "⚡ Ultra Rápido (Groq → DeepSeek → Gemini)")
+    if preferencia == "DeepSeek · API Beta":
+        return ["deepseek"]
     if preferencia == "Solo Groq (Llama 3)":
         return ["groq"]
-    if preferencia == "Solo OpenAI (GPT-4o-mini)":
-        return ["openai"]
     if preferencia == "Solo Gemini":
         return ["gemini"]
-    if preferencia == "Automático (Gemini → Groq → OpenAI)":
-        return ["gemini", "groq", "openai"]
-    return ["groq", "gemini", "openai"]
+    if preferencia == "Solo OpenAI (GPT-4o-mini)":
+        return ["openai"]
+    if preferencia == "Automático (Gemini → Groq → DeepSeek → OpenAI)":
+        return ["gemini", "groq", "deepseek", "openai"]
+    return ["groq", "deepseek", "gemini", "openai"]
 
-def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: bool = False, usar_google_search: bool = False):
+def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: bool = False, usar_google_search: bool = False, max_tokens: int = 2500):
+    skill_txt = obtener_instruccion_skill()
+    prompt_con_skill = f"SKILL ACTIVA DEL SUBAGENTE: {skill_txt}\n\n{prompt}" if skill_txt else prompt
+
     motores = obtener_orden_motores()
     errores = []
 
@@ -861,21 +909,21 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                 errores.append("Gemini: sin API Key")
                 continue
             if st.session_state.get("gemini_agotado") and len(motores) > 1:
-                errores.append("Gemini: cuota agotada (saltado para ahorrar tiempo)")
+                errores.append("Gemini: cuota agotada (saltado)")
                 continue
 
             client = genai.Client(api_key=g_key)
             audio_file = None
             try:
-                contents = prompt
+                contents = prompt_con_skill
                 if audio_path:
                     audio_file = client.files.upload(file=audio_path)
                     while audio_file.state.name == "PROCESSING":
                         time.sleep(1.0)
                         audio_file = client.files.get(name=audio_file.name)
-                    contents = [audio_file, prompt]
+                    contents = [audio_file, prompt_con_skill]
 
-                cfg_kwargs = {"max_output_tokens": 2048}
+                cfg_kwargs = {"max_output_tokens": max_tokens}
                 if esperar_json:
                     cfg_kwargs["response_mime_type"] = "application/json"
                 elif usar_google_search:
@@ -909,23 +957,44 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                 errores.append("Groq: sin API Key")
                 continue
             try:
-                prompt_final = prompt
+                prompt_final = prompt_con_skill
                 if audio_path:
                     transcripcion = transcribir_audio_whisper_api(audio_path, "groq", gr_key)
-                    transcripcion_lista = compactar_transcripcion(transcripcion, max_chars=14000)
-                    prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion_lista}\n\nINSTRUCCIÓN:\n{prompt}"
+                    transcripcion_lista = compactar_transcripcion(transcripcion, max_chars=11500)
+                    prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion_lista}\n\nINSTRUCCIÓN:\n{prompt_con_skill}"
                 try:
-                    texto, modelo_usado = llamar_chat_openai_compatible("groq", gr_key, prompt_final, esperar_json=esperar_json)
+                    texto, modelo_usado = llamar_chat_openai_compatible("groq", gr_key, prompt_final, esperar_json=esperar_json, max_tokens=max_tokens)
                     return texto, f"Groq ({modelo_usado})"
                 except Exception as e_413:
                     if "413" in str(e_413) or "too large" in str(e_413).lower():
-                        st.session_state["groq_modelo_cache"] = "llama-3.1-8b-instant"
-                        prompt_mini = compactar_transcripcion(prompt_final, max_chars=8000)
-                        texto, modelo_usado = llamar_chat_openai_compatible("groq", gr_key, prompt_mini, esperar_json=esperar_json)
+                        prompt_mini = compactar_transcripcion(prompt_final, max_chars=7000)
+                        texto, modelo_usado = llamar_chat_openai_compatible("groq", gr_key, prompt_mini, esperar_json=esperar_json, max_tokens=max_tokens)
                         return texto, f"Groq ({modelo_usado} · compactado)"
                     raise e_413
             except Exception as e_gr:
                 errores.append(f"Groq: {e_gr}")
+
+        elif motor == "deepseek":
+            ds_key = user_config.get("deepseek_key", "").strip()
+            if not ds_key:
+                errores.append("DeepSeek Beta: sin llave de API")
+                continue
+            try:
+                prompt_final = prompt_con_skill
+                if audio_path:
+                    # Si tiene clave de Groq u OpenAI transcribe con Whisper; si no, lee audio/texto disponible
+                    trans_key = user_config.get("groq_key", "").strip() or user_config.get("openai_key", "").strip()
+                    trans_prov = "groq" if user_config.get("groq_key", "").strip() else "openai"
+                    if trans_key:
+                        transcripcion = transcribir_audio_whisper_api(audio_path, trans_prov, trans_key)
+                        transcripcion_lista = compactar_transcripcion(transcripcion, max_chars=24000)
+                        prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion_lista}\n\nINSTRUCCIÓN:\n{prompt_con_skill}"
+                    else:
+                        prompt_final = f"Analiza y responde según la instrucción:\n{prompt_con_skill}"
+                texto, modelo_usado = llamar_chat_openai_compatible("deepseek", ds_key, prompt_final, esperar_json=esperar_json, max_tokens=max_tokens)
+                return texto, f"DeepSeek Beta ({modelo_usado})"
+            except Exception as e_ds:
+                errores.append(f"DeepSeek Beta: {e_ds}")
 
         elif motor == "openai":
             oa_key = user_config.get("openai_key", "").strip()
@@ -933,18 +1002,18 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                 errores.append("OpenAI: sin API Key")
                 continue
             try:
-                prompt_final = prompt
+                prompt_final = prompt_con_skill
                 if audio_path:
                     transcripcion = transcribir_audio_whisper_api(audio_path, "openai", oa_key)
                     transcripcion_lista = compactar_transcripcion(transcripcion, max_chars=24000)
-                    prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion_lista}\n\nINSTRUCCIÓN:\n{prompt}"
-                texto, modelo_usado = llamar_chat_openai_compatible("openai", oa_key, prompt_final, esperar_json=esperar_json)
+                    prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion_lista}\n\nINSTRUCCIÓN:\n{prompt_con_skill}"
+                texto, modelo_usado = llamar_chat_openai_compatible("openai", oa_key, prompt_final, esperar_json=esperar_json, max_tokens=max_tokens)
                 return texto, f"OpenAI ({modelo_usado})"
             except Exception as e_oa:
                 errores.append(f"OpenAI: {e_oa}")
 
     resumen = " | ".join(errores)
-    raise Exception(f"No se pudo completar con ningún motor IA. Revisa tus API Keys en la barra lateral (⚙️ Motor IA y API Keys). Detalle: {resumen}")
+    raise Exception(f"No se pudo completar con ningún motor IA. Revisa tus llaves en la barra lateral (⚙️ Opciones). Detalle: {resumen}")
 
 # --- COLORES Y LAYOUTS ---
 COLORES_SUBTITULOS = {
@@ -1019,7 +1088,7 @@ def buscar_momentos_ia(audio_path: str, instruccion_usuario: str, num_clips: int
 
     prompt = f"""
     Eres el asistente IA de edición de video estilo Nexus Clips.
-    Analiza este audio completo y extrae los {num_clips} mejores momentos que cumplan EXACTAMENTE con lo que pide el creador.
+    Analiza este audio y extrae los {num_clips} mejores momentos que cumplan EXACTAMENTE con lo que pide el creador.
 
     INSTRUCCIÓN DEL CREADOR: "{instruccion_usuario}"
     DURACIÓN OBJETIVO POR CLIP: {duracion_objetivo}
@@ -1027,18 +1096,20 @@ def buscar_momentos_ia(audio_path: str, instruccion_usuario: str, num_clips: int
     REGLAS:
 - Los cortes deben empezar y terminar en frases completas.
 - Devuelve exclusivamente un JSON válido con una lista bajo la clave "clips".
+- Sé conciso en "motivo" y "subtitulos" (máximo 3 frases cortas por clip) para que la respuesta sea rápida y completa.
 - Cada clip debe incluir:
-  - "titulo": título/gancho corto y atractivo
-  - "gancho_visual": texto ultra corto (3 a 6 palabras en MAYÚSCULAS) para poner arriba del video
-  - "start": segundo exacto de inicio en el audio (número float)
-  - "end": segundo exacto de fin en el audio (número float)
-  - "motivo": por qué este momento funciona bien
+  - "titulo": título/gancho corto
+  - "gancho_visual": texto ultra corto (3 a 6 palabras en MAYÚSCULAS)
+  - "start": segundo exacto de inicio en el audio (float)
+  - "end": segundo exacto de fin en el audio (float)
+  - "motivo": razón breve de por qué este momento funciona
   - "puntaje_viral": entero del 1 al 100
-  - "descripcion_redes": copy listo para TikTok/Shorts/Reels con hashtags
-  - "subtitulos": lista de frases cortas (3 a 5 palabras) dentro del clip, cada una con "start" (relativo desde 0.0), "end" (relativo) y "text".
+  - "descripcion_redes": copy corto para TikTok/Shorts con hashtags
+  - "subtitulos": lista de 2 a 3 frases cortas con "start", "end" y "text".
     """
 
-    texto_json, motor_usado = ejecutar_ia_con_respaldo(prompt, audio_path=audio_path, esperar_json=True)
+    tokens_salida = 3200 if num_clips > 5 else 2200
+    texto_json, motor_usado = ejecutar_ia_con_respaldo(prompt, audio_path=audio_path, esperar_json=True, max_tokens=tokens_salida)
     clips = json.loads(texto_json)["clips"]
     if offset_seg > 0:
         for c in clips:
@@ -1326,7 +1397,7 @@ if nav_cols[-1].button("🚪 Salir", key="top_nav_logout", use_container_width=T
         del st.session_state[k]
     st.rerun()
 
-# --- BARRA LATERAL (SELECTOR DE MOTOR IA + API KEYS + BUSCAR ACTUALIZACIONES) ---
+# --- BARRA LATERAL (ENGRANAJE "OPCIONES" + DEEPSEEK BETA + SKILL + ACTUALIZACIONES) ---
 total_clips_creados = len(list(CLIPS_DIR.glob("*.mp4"))) + len(list(EDITED_DIR.glob("*.mp4")))
 
 with st.sidebar:
@@ -1341,32 +1412,54 @@ with st.sidebar:
         st.warning("🆓 Plan Free (con marca de agua)")
 
     st.divider()
-    with st.expander("⚙️ Motor IA y API Keys", expanded=True):
+    with st.expander("⚙️ Opciones", expanded=False):
         opciones_motor = [
-            "⚡ Ultra Rápido (Groq → Gemini → OpenAI)",
-            "Automático (Gemini → Groq → OpenAI)",
+            "⚡ Ultra Rápido (Groq → DeepSeek → Gemini)",
+            "DeepSeek · API Beta",
             "Solo Groq (Llama 3)",
             "Solo Gemini",
+            "Automático (Gemini → Groq → DeepSeek → OpenAI)",
             "Solo OpenAI (GPT-4o-mini)"
         ]
         motor_actual = user_config.get("motor_ia", opciones_motor[0])
         if motor_actual not in opciones_motor:
             motor_actual = opciones_motor[0]
 
-        motor_sel = st.selectbox("🧠 Motor IA:", opciones_motor, index=opciones_motor.index(motor_actual))
-        k_groq = st.text_input("Groq API Key (Más rápido y gratis):", value=user_config.get("groq_key", ""), type="password", placeholder="gsk_...")
-        k_gemini = st.text_input("Gemini API Key:", value=user_config.get("api_key", ""), type="password", placeholder="AIza...")
-        k_openai = st.text_input("OpenAI API Key (Opcional):", value=user_config.get("openai_key", ""), type="password", placeholder="sk-...")
+        motor_sel = st.selectbox("🧠 Motor:", opciones_motor, index=opciones_motor.index(motor_actual))
 
-        if st.button("💾 Guardar motores y claves", use_container_width=True):
+        lista_skills = list(SKILLS_DISPONIBLES.keys())
+        skill_actual = user_config.get("skill_ia", lista_skills[0])
+        if skill_actual not in lista_skills:
+            skill_actual = lista_skills[0]
+        skill_sel = st.selectbox("🧩 Skill / Subagente:", lista_skills, index=lista_skills.index(skill_actual))
+
+        st.divider()
+        st.markdown("**DeepSeek · con tu llave de API** <span class='beta-badge'>Beta</span>", unsafe_allow_html=True)
+        st.caption("Trabaja con los modelos de DeepSeek: las skills y subagentes van igual que con Claude. Se cobra por uso, del saldo de tu cuenta de DeepSeek.")
+        k_deepseek = st.text_input(
+            "Añadir llave de DeepSeek",
+            value=user_config.get("deepseek_key", ""),
+            type="password",
+            placeholder="sk-..."
+        )
+        st.caption("Está en beta: puedes probarlo, pero puede tener errores. Si te topas con uno, repórtalo en la Comunidad, en Ayuda.")
+
+        st.divider()
+        k_groq = st.text_input("Groq API Key:", value=user_config.get("groq_key", ""), type="password", placeholder="gsk_...")
+        k_gemini = st.text_input("Gemini API Key:", value=user_config.get("api_key", ""), type="password", placeholder="AIza...")
+        k_openai = st.text_input("OpenAI API Key:", value=user_config.get("openai_key", ""), type="password", placeholder="sk-...")
+
+        if st.button("💾 Guardar opciones", type="primary", use_container_width=True):
             user_config["motor_ia"] = motor_sel
+            user_config["skill_ia"] = skill_sel
+            user_config["deepseek_key"] = k_deepseek.strip()
             user_config["api_key"] = k_gemini.strip()
             user_config["groq_key"] = k_groq.strip()
             user_config["openai_key"] = k_openai.strip()
             st.session_state.pop("gemini_agotado", None)
-            st.session_state.pop("groq_modelo_cache", None)
+            st.session_state.pop("groq_modelos_lista", None)
             guardar_json(USER_CONFIG_FILE, user_config)
-            st.success("¡Guardado!")
+            st.success("¡Opciones guardadas!")
 
     if proyectos:
         st.divider()
@@ -1784,7 +1877,7 @@ elif pagina == "📈 Tendencias TikTok":
             st.warning("🔒 **Función exclusiva del Plan SUPER PRO**")
             st.markdown("""
             Sube al **Plan Super Pro** para desbloquear:
-            - 🔎 **Buscador de Tendencias en Vivo (Groq / Gemini / OpenAI):** qué temas, formatos y ganchos explotan HOY en tu nicho y país.
+            - 🔎 **Buscador de Tendencias en Vivo (Groq / DeepSeek / Gemini / OpenAI):** qué temas, formatos y ganchos explotan HOY en tu nicho y país.
             - 🧬 **Clonador de Fórmula Viral:** pega el link de cualquier TikTok viral, extrae su gancho de 3 segundos, ritmo y CTA, y úsalo como molde en tus propios videos con un clic.
             - 🎞️ Hasta **10 clips** por video.
             """)
