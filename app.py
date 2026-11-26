@@ -28,7 +28,7 @@ st.set_page_config(
 ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]
 YAPE_NUMERO = "+51 953 027 160"
 YAPE_WHATSAPP = "51953027160"
-VERSION_ACTUAL = "1.4.4"
+VERSION_ACTUAL = "1.4.6"
 URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
 MODELOS_GEMINI = ["gemini-3.8-flash"]
 
@@ -696,12 +696,27 @@ user_config = cargar_json(USER_CONFIG_FILE, {})
 proyectos = cargar_json(PROJECTS_FILE, [])
 
 # ==============================================================================
-# MOTORES IA: VELOCIDAD OPTIMIZADA (CACHÉ DE TRANSCRIPCIÓN + AUTO-MODELO GROQ)
+# MOTORES IA: ANTI-413 (AUTO-COMPACTACIÓN DE TRANSCRIPCIÓN + MODELOS LAMA)
 # ==============================================================================
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
+def compactar_transcripcion(transcripcion: str, max_chars: int = 15000) -> str:
+    """Si la transcripción es muy larga (evita error 413), conserva líneas clave distribuidas con timestamps."""
+    if len(transcripcion) <= max_chars:
+        return transcripcion
+    lineas = transcripcion.splitlines()
+    if len(lineas) <= 30:
+        return transcripcion[:max_chars]
+
+    # Tomar muestra uniforme para conservar principio, medio y final del video
+    paso = max(1, len(lineas) // 160)
+    muestra = lineas[::paso]
+    texto_compacto = "\n".join(muestra)
+    if len(texto_compacto) > max_chars:
+        texto_compacto = texto_compacto[:max_chars]
+    return texto_compacto + "\n[...transcripción compactada para mantener velocidad y límite de tokens...]"
+
 def obtener_modelo_groq_disponible(api_key: str) -> str:
-    """Consulta la cuenta de Groq una sola vez por sesión y guarda el modelo en caché."""
     if st.session_state.get("groq_modelo_cache"):
         return st.session_state["groq_modelo_cache"]
 
@@ -715,9 +730,9 @@ def obtener_modelo_groq_disponible(api_key: str) -> str:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         modelos = [m["id"] for m in data.get("data", []) if m.get("id")]
-        excluidos = ("whisper", "guard", "tts", "playai", "embed", "moderation", "orpheus", "safeguard")
+        excluidos = ("whisper", "guard", "tts", "playai", "embed", "moderation", "orpheus", "safeguard", "qwen")
         chat_modelos = [m for m in modelos if not any(ex in m.lower() for ex in excluidos)]
-        for preferido in ("llama-3.1-8b-instant", "llama-3.3-70b", "llama-4", "qwen", "deepseek", "gemma"):
+        for preferido in ("llama-3.1-8b-instant", "llama-3.3-70b", "llama-4", "gemma", "deepseek"):
             for m in chat_modelos:
                 if preferido in m.lower():
                     st.session_state["groq_modelo_cache"] = m
@@ -730,7 +745,6 @@ def obtener_modelo_groq_disponible(api_key: str) -> str:
     return "llama-3.1-8b-instant"
 
 def transcribir_audio_whisper_api(audio_path: str, proveedor: str, api_key: str) -> str:
-    """Transcribe audio con Whisper y guarda en caché para que búsquedas repetidas sean instantáneas."""
     cache = st.session_state["transcripciones_cache"]
     if audio_path in cache:
         return cache[audio_path]
@@ -800,7 +814,8 @@ def llamar_chat_openai_compatible(proveedor: str, api_key: str, prompt: str, esp
     payload_dict = {
         "model": modelo,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.4
+        "temperature": 0.4,
+        "max_tokens": 2048
     }
     if esperar_json:
         payload_dict["response_format"] = {"type": "json_object"}
@@ -845,7 +860,6 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
             if not g_key:
                 errores.append("Gemini: sin API Key")
                 continue
-            # Si Gemini ya dio 429 en esta sesión y hay otros motores, saltarlo al instante
             if st.session_state.get("gemini_agotado") and len(motores) > 1:
                 errores.append("Gemini: cuota agotada (saltado para ahorrar tiempo)")
                 continue
@@ -861,15 +875,16 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                         audio_file = client.files.get(name=audio_file.name)
                     contents = [audio_file, prompt]
 
-                cfg = None
+                cfg_kwargs = {"max_output_tokens": 2048}
                 if esperar_json:
-                    cfg = types.GenerateContentConfig(response_mime_type="application/json")
+                    cfg_kwargs["response_mime_type"] = "application/json"
                 elif usar_google_search:
-                    cfg = types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())])
+                    cfg_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                cfg = types.GenerateContentConfig(**cfg_kwargs)
 
                 for modelo in MODELOS_GEMINI:
                     try:
-                        resp = client.models.generate_content(model=modelo, contents=contents, config=cfg) if cfg else client.models.generate_content(model=modelo, contents=contents)
+                        resp = client.models.generate_content(model=modelo, contents=contents, config=cfg)
                         return resp.text, f"Gemini ({modelo})"
                     except Exception as e_mod:
                         errores.append(f"{modelo}: {e_mod}")
@@ -897,9 +912,18 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                 prompt_final = prompt
                 if audio_path:
                     transcripcion = transcribir_audio_whisper_api(audio_path, "groq", gr_key)
-                    prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion}\n\nINSTRUCCIÓN:\n{prompt}"
-                texto, modelo_usado = llamar_chat_openai_compatible("groq", gr_key, prompt_final, esperar_json=esperar_json)
-                return texto, f"Groq ({modelo_usado})"
+                    transcripcion_lista = compactar_transcripcion(transcripcion, max_chars=14000)
+                    prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion_lista}\n\nINSTRUCCIÓN:\n{prompt}"
+                try:
+                    texto, modelo_usado = llamar_chat_openai_compatible("groq", gr_key, prompt_final, esperar_json=esperar_json)
+                    return texto, f"Groq ({modelo_usado})"
+                except Exception as e_413:
+                    if "413" in str(e_413) or "too large" in str(e_413).lower():
+                        st.session_state["groq_modelo_cache"] = "llama-3.1-8b-instant"
+                        prompt_mini = compactar_transcripcion(prompt_final, max_chars=8000)
+                        texto, modelo_usado = llamar_chat_openai_compatible("groq", gr_key, prompt_mini, esperar_json=esperar_json)
+                        return texto, f"Groq ({modelo_usado} · compactado)"
+                    raise e_413
             except Exception as e_gr:
                 errores.append(f"Groq: {e_gr}")
 
@@ -912,7 +936,8 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                 prompt_final = prompt
                 if audio_path:
                     transcripcion = transcribir_audio_whisper_api(audio_path, "openai", oa_key)
-                    prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion}\n\nINSTRUCCIÓN:\n{prompt}"
+                    transcripcion_lista = compactar_transcripcion(transcripcion, max_chars=24000)
+                    prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion_lista}\n\nINSTRUCCIÓN:\n{prompt}"
                 texto, modelo_usado = llamar_chat_openai_compatible("openai", oa_key, prompt_final, esperar_json=esperar_json)
                 return texto, f"OpenAI ({modelo_usado})"
             except Exception as e_oa:
@@ -961,7 +986,6 @@ def descargar_video(url: str, proj_id: str) -> str:
     return str(output_path)
 
 def extraer_audio(video_path: str, proj_id: str, min_inicio: float = 0.0, min_fin: float = 0.0) -> str:
-    """Extrae audio ligero mono 16kHz 32kbps para subir y transcribir 3x más rápido."""
     audio_path = WORK_DIR / f"audio_{proj_id}.mp3"
     if audio_path.exists():
         audio_path.unlink()
@@ -1049,16 +1073,16 @@ def analizar_clip_para_redes_ia(video_path: str, tono: str, contexto_extra: str 
 def buscar_tendencias_tiktok_ia(nicho: str, region: str, detalle_extra: str = ""):
     fecha_hoy = datetime.now().strftime("%d/%m/%Y")
     prompt = f"""
-    Hoy es {fecha_hoy}. Investiga qué temas, formatos, audios y ganchos están explotando HOY en TikTok.
+    Hoy es {fecha_hoy}. Genera un resumen conciso y directo (sin rodeos) sobre qué temas y ganchos funcionan hoy en TikTok.
     NICHO: {nicho}
     PAÍS / REGIÓN: {region}
     ENFOQUE EXTRA: {detalle_extra if detalle_extra.strip() else "Lo más viral y con mayor retención actual"}
 
-    Devuelve un informe claro y accionable en español con:
-    1. **🔥 Top 5 Temas / Tendencias explotando hoy** (qué está pasando y por qué genera vistas).
-    2. **🎣 5 Ganchos (Hooks) de 3 segundos** listos para copiar y pegar arriba del video.
-    3. **🎬 3 Ideas de clips exactas** adaptadas a este nicho.
-    4. **🤖 Prompt listo para copiar en el Chat IA** (una instrucción exacta para buscar momentos así en un video largo).
+    Responde en español con formato limpio:
+    1. **🔥 Top 5 Temas en tendencia** (1 línea por tema).
+    2. **🎣 5 Ganchos (Hooks) de 3 segundos** (cortos y listos para usar).
+    3. **🎬 3 Ideas de clips** (1 línea por idea).
+    4. **🤖 Prompt molde para el Chat IA** (una frase exacta de máximo 2 líneas para buscar clips en videos largos).
     """
     return ejecutar_ia_con_respaldo(prompt, esperar_json=False, usar_google_search=True)
 
