@@ -28,9 +28,9 @@ st.set_page_config(
 ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]
 YAPE_NUMERO = "+51 953 027 160"
 YAPE_WHATSAPP = "51953027160"
-VERSION_ACTUAL = "1.4.0"
+VERSION_ACTUAL = "1.4.1"
 URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
-MODELOS_GEMINI = ["gemini-3.8-flash", "gemini-2.5-flash"]
+MODELOS_GEMINI = ["gemini-3.8-flash"]
 
 # --- ESTILO VISUAL PREMIUM (NEXUS STUDIO VIBRANT DARK + NEON GLASS) ---
 st.markdown("""
@@ -696,7 +696,6 @@ proyectos = cargar_json(PROJECTS_FILE, [])
 # MOTORES IA: GEMINI + RESPALDO AUTOMÁTICO GROQ (LLAMA 3) Y OPENAI (GPT-4O-MINI)
 # ==============================================================================
 def transcribir_audio_whisper_api(audio_path: str, proveedor: str, api_key: str) -> str:
-    """Transcribe audio con timestamps usando Groq Whisper o OpenAI Whisper vía HTTP puro."""
     if proveedor == "groq":
         url = "https://api.groq.com/openai/v1/audio/transcriptions"
         modelo = "whisper-large-v3-turbo"
@@ -744,7 +743,6 @@ def transcribir_audio_whisper_api(audio_path: str, proveedor: str, api_key: str)
     return data.get("text", "")
 
 def llamar_chat_openai_compatible(proveedor: str, api_key: str, prompt: str, esperar_json: bool = False) -> str:
-    """Llama a Groq (Llama 3.3 70B) o OpenAI (GPT-4o-mini) vía HTTP puro."""
     if proveedor == "groq":
         url = "https://api.groq.com/openai/v1/chat/completions"
         modelo = "llama-3.3-70b-versatile"
@@ -784,12 +782,10 @@ def obtener_orden_motores():
     return ["gemini", "groq", "openai"]
 
 def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: bool = False, usar_google_search: bool = False):
-    """Ejecuta el prompt en el motor elegido y hace respaldo automático si Gemini falla (503)."""
     motores = obtener_orden_motores()
     errores = []
 
     for motor in motores:
-        # 1. GEMINI
         if motor == "gemini":
             g_key = user_config.get("api_key", "").strip()
             if not g_key:
@@ -830,7 +826,6 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                     except Exception:
                         pass
 
-        # 2. GROQ (Llama 3 + Whisper)
         elif motor == "groq":
             gr_key = user_config.get("groq_key", "").strip()
             if not gr_key:
@@ -846,7 +841,6 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
             except Exception as e_gr:
                 errores.append(f"Groq: {e_gr}")
 
-        # 3. OPENAI (GPT-4o-mini + Whisper)
         elif motor == "openai":
             oa_key = user_config.get("openai_key", "").strip()
             if not oa_key:
@@ -901,8 +895,7 @@ def descargar_video(url: str, proj_id: str) -> str:
     ]
     resultado = subprocess.run(cmd, capture_output=True, text=True)
     if resultado.returncode != 0:
-        st.error(f"No hemos podido importar este enlace:\n{resultado.stderr}")
-        st.stop()
+        raise Exception(f"No hemos podido importar este enlace:\n{resultado.stderr}")
     return str(output_path)
 
 def extraer_audio(video_path: str, proj_id: str, min_inicio: float = 0.0, min_fin: float = 0.0) -> str:
@@ -919,8 +912,7 @@ def extraer_audio(video_path: str, proj_id: str, min_inicio: float = 0.0, min_fi
 
     resultado = subprocess.run(cmd, capture_output=True, text=True)
     if resultado.returncode != 0:
-        st.error(f"Error al preparar el audio con FFmpeg:\n{resultado.stderr}")
-        st.stop()
+        raise Exception(f"Error al preparar el audio con FFmpeg:\n{resultado.stderr}")
     return str(audio_path)
 
 def obtener_duracion_video(video_path: str) -> float:
@@ -959,12 +951,7 @@ def buscar_momentos_ia(audio_path: str, instruccion_usuario: str, num_clips: int
   - "subtitulos": lista de frases cortas (3 a 5 palabras) dentro del clip, cada una con "start" (relativo desde 0.0), "end" (relativo) y "text".
     """
 
-    try:
-        texto_json, motor_usado = ejecutar_ia_con_respaldo(prompt, audio_path=audio_path, esperar_json=True)
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
-
+    texto_json, motor_usado = ejecutar_ia_con_respaldo(prompt, audio_path=audio_path, esperar_json=True)
     clips = json.loads(texto_json)["clips"]
     if offset_seg > 0:
         for c in clips:
@@ -988,9 +975,6 @@ def analizar_clip_para_redes_ia(video_path: str, tono: str, contexto_extra: str 
     """
     try:
         texto_json, motor_usado = ejecutar_ia_con_respaldo(prompt, audio_path=audio_temp, esperar_json=True)
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
     finally:
         if os.path.exists(audio_temp):
             try:
@@ -1013,12 +997,7 @@ def buscar_tendencias_tiktok_ia(nicho: str, region: str, detalle_extra: str = ""
     3. **🎬 3 Ideas de clips exactas** adaptadas a este nicho.
     4. **🤖 Prompt listo para copiar en el Chat IA** (una instrucción exacta para buscar momentos así en un video largo).
     """
-    try:
-        texto, motor_usado = ejecutar_ia_con_respaldo(prompt, esperar_json=False, usar_google_search=True)
-        return texto, motor_usado
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
+    return ejecutar_ia_con_respaldo(prompt, esperar_json=False, usar_google_search=True)
 
 def clonar_formula_viral_ia(tiktok_url: str):
     proj_id = f"clon_{datetime.now().strftime('%H%M%S')}"
@@ -1042,9 +1021,6 @@ def clonar_formula_viral_ia(tiktok_url: str):
     """
     try:
         texto_json, motor_usado = ejecutar_ia_con_respaldo(prompt, audio_path=a_path, esperar_json=True)
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
     finally:
         if os.path.exists(a_path):
             try:
@@ -1148,8 +1124,7 @@ def renderizar_clip(
     ]
     resultado = subprocess.run(cmd, capture_output=True, text=True)
     if resultado.returncode != 0:
-        st.error(f"Error al renderizar con FFmpeg:\n{resultado.stderr}")
-        st.stop()
+        raise Exception(f"Error al renderizar con FFmpeg:\n{resultado.stderr}")
 
 def editar_video_ffmpeg(input_path: str, output_path: str, start: float, end: float, velocidad: float, volumen: float, brillo: float, contraste: float, texto_hook: str):
     duracion = max(0.5, end - start)
@@ -1186,8 +1161,7 @@ def editar_video_ffmpeg(input_path: str, output_path: str, start: float, end: fl
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        st.error(f"Error al editar el video:\n{res.stderr}")
-        st.stop()
+        raise Exception(f"Error al editar el video:\n{res.stderr}")
 
 def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
     file_size = os.path.getsize(video_path)
@@ -1374,35 +1348,41 @@ if pagina == "💬 Inicio (Chat IA)":
                 if not url_input:
                     st.warning("Pega un enlace primero.")
                 else:
+                    try:
+                        proj_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        with st.spinner("Descargando vídeo..."):
+                            v_path = descargar_video(url_input, proj_id)
+                        with st.spinner("Extrayendo audio para la IA..."):
+                            a_path = extraer_audio(v_path, proj_id, min_ini, min_fin)
+                        st.session_state["proj_id"] = proj_id
+                        st.session_state["video_path"] = v_path
+                        st.session_state["audio_path"] = a_path
+                        st.session_state["offset_seg"] = min_ini * 60
+                        st.session_state["nombre_proyecto"] = f"Video {proj_id}"
+                        st.session_state.pop("clips_encontrados", None)
+                        st.success("¡Vídeo listo! Ahora configura el Paso 2 abajo.")
+                    except Exception as e:
+                        st.error(str(e))
+
+        with tab_file:
+            archivo = st.file_uploader("Arrastra tu MP4, MOV o MKV", type=["mp4", "mov", "mkv"])
+            if archivo and st.button("⚙️ Preparar archivo", type="primary", key="btn_import_file"):
+                try:
                     proj_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    with st.spinner("Descargando vídeo..."):
-                        v_path = descargar_video(url_input, proj_id)
+                    v_path = str(WORK_DIR / f"video_{proj_id}.mp4")
+                    with open(v_path, "wb") as f:
+                        f.write(archivo.read())
                     with st.spinner("Extrayendo audio para la IA..."):
                         a_path = extraer_audio(v_path, proj_id, min_ini, min_fin)
                     st.session_state["proj_id"] = proj_id
                     st.session_state["video_path"] = v_path
                     st.session_state["audio_path"] = a_path
                     st.session_state["offset_seg"] = min_ini * 60
-                    st.session_state["nombre_proyecto"] = f"Video {proj_id}"
+                    st.session_state["nombre_proyecto"] = archivo.name
                     st.session_state.pop("clips_encontrados", None)
-                    st.success("¡Vídeo listo! Ahora configura el Paso 2 abajo.")
-
-        with tab_file:
-            archivo = st.file_uploader("Arrastra tu MP4, MOV o MKV", type=["mp4", "mov", "mkv"])
-            if archivo and st.button("⚙️ Preparar archivo", type="primary", key="btn_import_file"):
-                proj_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-                v_path = str(WORK_DIR / f"video_{proj_id}.mp4")
-                with open(v_path, "wb") as f:
-                    f.write(archivo.read())
-                with st.spinner("Extrayendo audio para la IA..."):
-                    a_path = extraer_audio(v_path, proj_id, min_ini, min_fin)
-                st.session_state["proj_id"] = proj_id
-                st.session_state["video_path"] = v_path
-                st.session_state["audio_path"] = a_path
-                st.session_state["offset_seg"] = min_ini * 60
-                st.session_state["nombre_proyecto"] = archivo.name
-                st.session_state.pop("clips_encontrados", None)
-                st.success("¡Archivo listo! Ahora configura el Paso 2 abajo.")
+                    st.success("¡Archivo listo! Ahora configura el Paso 2 abajo.")
+                except Exception as e:
+                    st.error(str(e))
 
     # --- PASO 2 ---
     if "audio_path" in st.session_state:
@@ -1434,29 +1414,32 @@ if pagina == "💬 Inicio (Chat IA)":
             duracion_obj = a2.selectbox("⏱️ Duración", ["15 a 30 segundos", "30 a 60 segundos", "60 a 90 segundos"], index=1)
 
             if st.button("🚀 Buscar momentos con IA", type="primary", use_container_width=True):
-                with st.spinner("La IA está analizando tu vídeo y detectando los mejores clips…"):
-                    clips, motor_usado = buscar_momentos_ia(
-                        st.session_state["audio_path"],
-                        instruccion,
-                        num_clips,
-                        duracion_obj,
-                        st.session_state.get("offset_seg", 0.0)
-                    )
-                    st.session_state["clips_encontrados"] = clips
+                try:
+                    with st.spinner("La IA está analizando tu vídeo y detectando los mejores clips…"):
+                        clips, motor_usado = buscar_momentos_ia(
+                            st.session_state["audio_path"],
+                            instruccion,
+                            num_clips,
+                            duracion_obj,
+                            st.session_state.get("offset_seg", 0.0)
+                        )
+                        st.session_state["clips_encontrados"] = clips
 
-                    nuevo_proj = {
-                        "id": st.session_state["proj_id"],
-                        "nombre": st.session_state.get("nombre_proyecto", "Proyecto sin título"),
-                        "fecha": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                        "video_path": st.session_state["video_path"],
-                        "audio_path": st.session_state["audio_path"],
-                        "clips": clips
-                    }
-                    proyectos = [p for p in proyectos if p["id"] != nuevo_proj["id"]]
-                    proyectos.insert(0, nuevo_proj)
-                    guardar_json(PROJECTS_FILE, proyectos)
+                        nuevo_proj = {
+                            "id": st.session_state["proj_id"],
+                            "nombre": st.session_state.get("nombre_proyecto", "Proyecto sin título"),
+                            "fecha": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                            "video_path": st.session_state["video_path"],
+                            "audio_path": st.session_state["audio_path"],
+                            "clips": clips
+                        }
+                        proyectos = [p for p in proyectos if p["id"] != nuevo_proj["id"]]
+                        proyectos.insert(0, nuevo_proj)
+                        guardar_json(PROJECTS_FILE, proyectos)
 
-                st.success(f"¡Listo! Encontré {len(clips)} momentos virales usando **{motor_usado}**.")
+                    st.success(f"¡Listo! Encontré {len(clips)} momentos virales usando **{motor_usado}**.")
+                except Exception as e:
+                    st.error(str(e))
 
     # --- PASO 3 ---
     if "clips_encontrados" in st.session_state:
@@ -1503,26 +1486,29 @@ if pagina == "💬 Inicio (Chat IA)":
                     out_file = str(CLIPS_DIR / f"{proj_id}_clip_{i+1}.mp4")
 
                     if st.button(f"✂️ Crear Clip #{i+1}", type="primary", use_container_width=True, key=f"render_{i}"):
-                        with st.spinner("Renderizando clip…"):
-                            srt_temp = None
-                            if usar_sub and clip.get("subtitulos"):
-                                srt_temp = str(WORK_DIR / f"temp_sub_{i+1}.srt")
-                                generar_srt_clip(clip["subtitulos"], srt_temp)
+                        try:
+                            with st.spinner("Renderizando clip…"):
+                                srt_temp = None
+                                if usar_sub and clip.get("subtitulos"):
+                                    srt_temp = str(WORK_DIR / f"temp_sub_{i+1}.srt")
+                                    generar_srt_clip(clip["subtitulos"], srt_temp)
 
-                            renderizar_clip(
-                                st.session_state["video_path"],
-                                inicio, fin, out_file,
-                                layout=layout_clip,
-                                usar_subtitulos=usar_sub,
-                                color_sub=color_ass,
-                                tamano_sub=tamano_sub,
-                                srt_filename=srt_temp,
-                                calidad=calidad_clip,
-                                con_marca_agua=(not es_pro)
-                            )
-                            if srt_temp and os.path.exists(srt_temp):
-                                os.remove(srt_temp)
-                        st.success("¡Clip listo!")
+                                renderizar_clip(
+                                    st.session_state["video_path"],
+                                    inicio, fin, out_file,
+                                    layout=layout_clip,
+                                    usar_subtitulos=usar_sub,
+                                    color_sub=color_ass,
+                                    tamano_sub=tamano_sub,
+                                    srt_filename=srt_temp,
+                                    calidad=calidad_clip,
+                                    con_marca_agua=(not es_pro)
+                                )
+                                if srt_temp and os.path.exists(srt_temp):
+                                    os.remove(srt_temp)
+                            st.success("¡Clip listo!")
+                        except Exception as e:
+                            st.error(str(e))
 
                     if os.path.exists(out_file):
                         st.video(out_file)
@@ -1592,11 +1578,14 @@ elif pagina == "✂️ Editor y Redes":
             contexto_extra = g2.text_input("Nota extra para la IA (opcional):", placeholder="Ej: Enfócate en el giro del final...")
 
             if st.button("✨ Analizar este clip con IA (Auto-Gancho + 5 Títulos)", type="primary", use_container_width=True):
-                with st.spinner("La IA está analizando tu clip para crear el Gancho visual y los Títulos..."):
-                    res_ia, motor_usado = analizar_clip_para_redes_ia(video_elegido, tono_video, contexto_extra)
-                    st.session_state["tiktok_ia"] = res_ia
-                    st.session_state["hook_auto"] = res_ia.get("gancho_visual", "")
-                st.success(f"¡Gancho visual y títulos generados con **{motor_usado}**!")
+                try:
+                    with st.spinner("La IA está analizando tu clip para crear el Gancho visual y los Títulos..."):
+                        res_ia, motor_usado = analizar_clip_para_redes_ia(video_elegido, tono_video, contexto_extra)
+                        st.session_state["tiktok_ia"] = res_ia
+                        st.session_state["hook_auto"] = res_ia.get("gancho_visual", "")
+                    st.success(f"¡Gancho visual y títulos generados con **{motor_usado}**!")
+                except Exception as e:
+                    st.error(str(e))
 
         with st.container(border=True):
             st.markdown('<span class="step-pill">EDITOR DE VIDEO</span>', unsafe_allow_html=True)
@@ -1627,15 +1616,18 @@ elif pagina == "✂️ Editor y Redes":
                 )
 
                 if st.button("✂️ Aplicar edición y quemar Gancho en el video", type="primary", use_container_width=True):
-                    nombre_editado = str(EDITED_DIR / f"editado_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
-                    with st.spinner("Aplicando edición en Full HD..."):
-                        editar_video_ffmpeg(
-                            video_elegido, nombre_editado, ed_ini, ed_fin,
-                            velocidad, volumen, brillo, contraste, texto_hook
-                        )
-                    st.session_state["video_editado_actual"] = nombre_editado
-                    st.success("¡Video editado con éxito!")
-                    st.rerun()
+                    try:
+                        nombre_editado = str(EDITED_DIR / f"editado_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
+                        with st.spinner("Aplicando edición en Full HD..."):
+                            editar_video_ffmpeg(
+                                video_elegido, nombre_editado, ed_ini, ed_fin,
+                                velocidad, volumen, brillo, contraste, texto_hook
+                            )
+                        st.session_state["video_editado_actual"] = nombre_editado
+                        st.success("¡Video editado con éxito!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
 
         with st.container(border=True):
             st.markdown('<span class="step-pill">PUBLICAR EN TIKTOK Y YOUTUBE</span>', unsafe_allow_html=True)
@@ -1726,10 +1718,13 @@ elif pagina == "📈 Tendencias TikTok":
             extra_trend = st.text_input("Tema específico (opcional):", placeholder="Ej: historias de terror cortas, reacciones de streamers, consejos de ahorro...")
 
             if st.button("📡 Escanear tendencias de hoy", type="primary", use_container_width=True):
-                with st.spinner(f"Buscando tendencias reales de {nicho} en {region}..."):
-                    resultado_trend, motor_usado = buscar_tendencias_tiktok_ia(nicho, region, extra_trend)
-                    st.session_state["resultado_tendencias"] = resultado_trend
-                    st.session_state["motor_tendencias"] = motor_usado
+                try:
+                    with st.spinner(f"Buscando tendencias reales de {nicho} en {region}..."):
+                        resultado_trend, motor_usado = buscar_tendencias_tiktok_ia(nicho, region, extra_trend)
+                        st.session_state["resultado_tendencias"] = resultado_trend
+                        st.session_state["motor_tendencias"] = motor_usado
+                except Exception as e:
+                    st.error(str(e))
 
         if "resultado_tendencias" in st.session_state:
             with st.container(border=True):
@@ -1746,10 +1741,13 @@ elif pagina == "📈 Tendencias TikTok":
                 if not url_tk.strip():
                     st.warning("Pega un enlace de TikTok primero.")
                 else:
-                    with st.spinner("Descargando TikTok y aplicando ingeniería inversa con IA..."):
-                        formula, motor_usado = clonar_formula_viral_ia(url_tk.strip())
-                        st.session_state["formula_clonada"] = formula
-                    st.success(f"¡Fórmula viral extraída con **{motor_usado}**!")
+                    try:
+                        with st.spinner("Descargando TikTok y aplicando ingeniería inversa con IA..."):
+                            formula, motor_usado = clonar_formula_viral_ia(url_tk.strip())
+                            st.session_state["formula_clonada"] = formula
+                        st.success(f"¡Fórmula viral extraída con **{motor_usado}**!")
+                    except Exception as e:
+                        st.error(str(e))
 
         if "formula_clonada" in st.session_state:
             f = st.session_state["formula_clonada"]
