@@ -23,10 +23,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CONFIGURACIÓN DE ADMIN Y YAPE ---
-ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]  # Tu cuenta administradora
+# --- CONFIGURACIÓN DE ADMIN PRINCIPAL Y YAPE ---
+ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]
 YAPE_NUMERO = "+51 953 027 160"
 YAPE_WHATSAPP = "51953027160"
+GLOBAL_CONFIG_FILE = Path("global_config.json")
 
 # --- ESTILO VISUAL PREMIUM (NEXUS STUDIO VIBRANT DARK + NEON GLASS) ---
 st.markdown("""
@@ -158,7 +159,7 @@ st.markdown("""
         box-shadow: 0 10px 35px rgba(0, 0, 0, 0.35);
     }
     .hero-title {
-        font-size: 2.5rem;
+        font-size: 2.4rem;
         font-weight: 800;
         background: linear-gradient(90deg, #ffffff 0%, #c084fc 45%, #38bdf8 100%);
         -webkit-background-clip: text;
@@ -181,7 +182,7 @@ st.markdown("""
         text-align: center;
     }
     .stat-num {
-        font-size: 1.5rem;
+        font-size: 1.4rem;
         font-weight: 800;
         color: #38bdf8;
     }
@@ -232,9 +233,6 @@ st.markdown("""
         font-size: 1.02rem;
         color: #e2e8f0;
         margin: 0.55rem 0;
-        display: flex;
-        align-items: center;
-        gap: 10px;
     }
     .price-box {
         background: rgba(124, 58, 237, 0.14);
@@ -265,7 +263,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# BASE DE DATOS: USUARIOS, PLANES Y KEYS DE LICENCIA
+# BASE DE DATOS: USUARIOS, PLANES, ROLES ADMIN Y KEYS
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect("usuarios.db")
@@ -275,10 +273,11 @@ def init_db():
             email TEXT PRIMARY KEY,
             password TEXT,
             plan_activo INTEGER DEFAULT 0,
-            plan_expira TEXT
+            plan_expira TEXT,
+            es_admin INTEGER DEFAULT 0
         )
     """)
-    for col_def in ("plan_activo INTEGER DEFAULT 0", "plan_expira TEXT"):
+    for col_def in ("plan_activo INTEGER DEFAULT 0", "plan_expira TEXT", "es_admin INTEGER DEFAULT 0"):
         try:
             c.execute(f"ALTER TABLE usuarios ADD COLUMN {col_def}")
         except sqlite3.OperationalError:
@@ -288,19 +287,35 @@ def init_db():
         CREATE TABLE IF NOT EXISTS license_keys (
             clave TEXT PRIMARY KEY,
             dias INTEGER,
+            da_admin INTEGER DEFAULT 0,
             usada_por TEXT,
             fecha_creacion TEXT,
             fecha_uso TEXT
         )
     """)
+    try:
+        c.execute("ALTER TABLE license_keys ADD COLUMN da_admin INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
 def encriptar_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
-def es_admin(email: str) -> bool:
+def es_admin_super(email: str) -> bool:
     return email.strip().lower() in [a.lower() for a in ADMIN_EMAILS]
+
+def es_admin(email: str) -> bool:
+    if es_admin_super(email):
+        return True
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("SELECT es_admin FROM usuarios WHERE email = ?", (email,))
+    row = c.fetchone()
+    conn.close()
+    return bool(row and row[0])
 
 def usuario_existe(email: str) -> bool:
     conn = sqlite3.connect("usuarios.db")
@@ -314,11 +329,12 @@ def registrar_usuario(email: str, password: str) -> bool:
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
     try:
-        activo = 1 if es_admin(email) else 0
-        expira = "ILIMITADO" if es_admin(email) else None
+        admin_flag = 1 if es_admin_super(email) else 0
+        activo = 1 if admin_flag else 0
+        expira = "ILIMITADO" if admin_flag else None
         c.execute(
-            "INSERT INTO usuarios (email, password, plan_activo, plan_expira) VALUES (?, ?, ?, ?)",
-            (email, encriptar_password(password), activo, expira)
+            "INSERT INTO usuarios (email, password, plan_activo, plan_expira, es_admin) VALUES (?, ?, ?, ?, ?)",
+            (email, encriptar_password(password), activo, expira, admin_flag)
         )
         conn.commit()
         return True
@@ -340,34 +356,34 @@ def verificar_login(email: str, password: str) -> bool:
 
 def obtener_estado_plan(email: str):
     if es_admin(email):
-        return True, "ADMIN (Ilimitado)"
+        return True, "ADMIN PRO (Ilimitado)"
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
     c.execute("SELECT plan_activo, plan_expira FROM usuarios WHERE email = ?", (email,))
     row = c.fetchone()
     conn.close()
     if not row or not row[0]:
-        return False, "Sin plan"
+        return False, "Plan Free"
     expira = row[1]
     if expira == "ILIMITADO":
-        return True, "Ilimitado"
+        return True, "Plan Pro (Ilimitado)"
     try:
         fecha_exp = datetime.strptime(expira, "%Y-%m-%d")
         if datetime.now() <= fecha_exp + timedelta(days=1):
-            return True, f"Hasta {expira}"
-        return False, f"Vencido ({expira})"
+            return True, f"Plan Pro (hasta {expira})"
+        return False, f"Plan Free (venció {expira})"
     except Exception:
-        return False, "Sin plan"
+        return False, "Plan Free"
 
-def generar_nueva_key(dias: int) -> str:
+def generar_nueva_key(dias: int, da_admin: bool = False) -> str:
     parte1 = secrets.token_hex(2).upper()
     parte2 = secrets.token_hex(2).upper()
     clave = f"CLIP-{parte1}-{parte2}"
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
     c.execute(
-        "INSERT INTO license_keys (clave, dias, usada_por, fecha_creacion, fecha_uso) VALUES (?, ?, NULL, ?, NULL)",
-        (clave, dias, datetime.now().strftime("%Y-%m-%d %H:%M"))
+        "INSERT INTO license_keys (clave, dias, da_admin, usada_por, fecha_creacion, fecha_uso) VALUES (?, ?, ?, NULL, ?, NULL)",
+        (clave, dias, 1 if da_admin else 0, datetime.now().strftime("%Y-%m-%d %H:%M"))
     )
     conn.commit()
     conn.close()
@@ -377,32 +393,36 @@ def canjear_key(email: str, clave: str):
     clave = clave.strip().upper()
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
-    c.execute("SELECT dias, usada_por FROM license_keys WHERE clave = ?", (clave,))
+    c.execute("SELECT dias, da_admin, usada_por FROM license_keys WHERE clave = ?", (clave,))
     row = c.fetchone()
     if not row:
         conn.close()
         return False, "La key no existe. Verifica que esté bien escrita."
-    dias, usada_por = row
+    dias, da_admin, usada_por = row
     if usada_por is not None:
         conn.close()
         return False, "Esta key ya fue utilizada por otra cuenta."
 
-    if dias == 0:
-        expira = "ILIMITADO"
-    else:
-        expira = (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
+    expira = "ILIMITADO" if dias == 0 else (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
 
     c.execute(
         "UPDATE license_keys SET usada_por = ?, fecha_uso = ? WHERE clave = ?",
         (email, datetime.now().strftime("%Y-%m-%d %H:%M"), clave)
     )
-    c.execute(
-        "UPDATE usuarios SET plan_activo = 1, plan_expira = ? WHERE email = ?",
-        (expira, email)
-    )
+    if da_admin:
+        c.execute(
+            "UPDATE usuarios SET plan_activo = 1, plan_expira = ?, es_admin = 1 WHERE email = ?",
+            (expira, email)
+        )
+    else:
+        c.execute(
+            "UPDATE usuarios SET plan_activo = 1, plan_expira = ? WHERE email = ?",
+            (expira, email)
+        )
     conn.commit()
     conn.close()
-    return True, f"¡Plan activado con éxito! Vigencia: {expira}"
+    extra_admin = " + Acceso Admin" if da_admin else ""
+    return True, f"¡Plan Pro activado{extra_admin}! Vigencia: {expira}"
 
 def actualizar_acceso_manual(email: str, activar: bool, dias: int = 30):
     conn = sqlite3.connect("usuarios.db")
@@ -415,10 +435,17 @@ def actualizar_acceso_manual(email: str, activar: bool, dias: int = 30):
     conn.commit()
     conn.close()
 
+def cambiar_rol_admin(email: str, hacer_admin: bool):
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("UPDATE usuarios SET es_admin = ? WHERE email = ?", (1 if hacer_admin else 0, email))
+    conn.commit()
+    conn.close()
+
 def listar_keys():
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
-    c.execute("SELECT clave, dias, usada_por, fecha_creacion, fecha_uso FROM license_keys ORDER BY fecha_creacion DESC")
+    c.execute("SELECT clave, dias, da_admin, usada_por, fecha_creacion, fecha_uso FROM license_keys ORDER BY fecha_creacion DESC")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -426,7 +453,7 @@ def listar_keys():
 def listar_usuarios():
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
-    c.execute("SELECT email, plan_activo, plan_expira FROM usuarios ORDER BY email ASC")
+    c.execute("SELECT email, plan_activo, plan_expira, es_admin FROM usuarios ORDER BY email ASC")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -479,7 +506,7 @@ if "pagina_actual" not in st.session_state:
     st.session_state["pagina_actual"] = "💬 Inicio (Chat IA)"
 
 # ==============================================================================
-# PANTALLA 1: LOGIN / REGISTRO CON GMAIL
+# PANTALLA DE LOGIN / REGISTRO CON GMAIL
 # ==============================================================================
 if not st.session_state["autenticado"]:
     _, col_centro, _ = st.columns([1, 1.6, 1])
@@ -546,146 +573,10 @@ if not st.session_state["autenticado"]:
     st.stop()
 
 # ==============================================================================
-# VERIFICACIÓN DE PLAN ACTIVO (PAYWALL "ÚLTIMO PASO" CON YAPE + KEY)
+# ESTADO DEL USUARIO ACTUAL (FREE / PRO / ADMIN)
 # ==============================================================================
-tiene_plan, texto_plan = obtener_estado_plan(st.session_state["usuario"])
-
-if not tiene_plan:
-    top_u1, top_u2 = st.columns([4, 1])
-    top_u1.caption(f"👤 {st.session_state['usuario']} · 🔒 Plan sin activar")
-    if top_u2.button("🚪 Cerrar sesión", use_container_width=True):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.rerun()
-
-    _, col_pay, _ = st.columns([0.5, 2.2, 0.5])
-    with col_pay:
-        with st.container(border=True):
-            st.markdown('<span class="step-pill">ÚLTIMO PASO</span>', unsafe_allow_html=True)
-            st.markdown('<div class="hero-title" style="text-align:left; font-size:2.2rem;">Consigue los clips de tu vídeo</div>', unsafe_allow_html=True)
-            st.write("")
-
-            st.markdown("""
-            <div class="benefit-item">✅ Los mejores momentos de todo tu vídeo, encontrados y ordenados</div>
-            <div class="benefit-item">✅ Descarga en HD sin marca de agua</div>
-            <div class="benefit-item">✅ Cambia cualquier clip: recórtalo, reencuádralo, cambia los subtítulos</div>
-            <div class="benefit-item">✅ Publica en TikTok y YouTube desde Mi Clipper IA Studio, con el texto escrito</div>
-            """, unsafe_allow_html=True)
-
-            st.write("")
-            es_anual = st.toggle("Descuento anual (61%)", value=True)
-
-            if es_anual:
-                st.markdown("""
-                <div class="price-box">
-                    <div style="font-size:1.05rem; font-weight:700; color:#e2e8f0;">Clips / Anual</div>
-                    <div style="margin-top:0.5rem;">
-                        <span style="text-decoration:line-through; color:#94a3b8; font-size:1.1rem;">$227.88</span>
-                        <span style="font-size:2rem; font-weight:800; color:#ffffff; margin-left:8px;">$7.50</span>
-                        <span style="color:#cbd5e1;">/mes</span>
-                        <span class="discount-pill">61% de descuento</span>
-                    </div>
-                    <div style="color:#94a3b8; font-size:0.88rem; margin-top:0.3rem;">Facturación anual · $89.99/año</div>
-                </div>
-                """, unsafe_allow_html=True)
-                plan_texto_wa = "Plan Anual ($89.99/año)"
-            else:
-                st.markdown("""
-                <div class="price-box">
-                    <div style="font-size:1.05rem; font-weight:700; color:#e2e8f0;">Clips / Mensual</div>
-                    <div style="margin-top:0.5rem;">
-                        <span style="font-size:2rem; font-weight:800; color:#ffffff;">$19.00</span>
-                        <span style="color:#cbd5e1;">/mes</span>
-                    </div>
-                    <div style="color:#94a3b8; font-size:0.88rem; margin-top:0.3rem;">Facturación mensual · Cancela cuando quieras</div>
-                </div>
-                """, unsafe_allow_html=True)
-                plan_texto_wa = "Plan Mensual ($19.00/mes)"
-
-            col_yape, col_key = st.columns(2)
-
-            with col_yape:
-                st.markdown(f"""
-                <div class="yape-card">
-                    <div style="font-size:0.85rem; color:#e9d5ff; font-weight:700;">PAGA CON YAPE</div>
-                    <div style="font-size:1.55rem; font-weight:800; color:#ffffff; margin:0.4rem 0;">{YAPE_NUMERO}</div>
-                    <div style="font-size:0.85rem; color:#cbd5e1;">Realiza tu Yape y envíanos la captura por WhatsApp para entregarte tu Key de acceso al instante.</div>
-                </div>
-                """, unsafe_allow_html=True)
-                st.write("")
-                msg_wa = urllib.parse.quote(
-                    f"Hola! Acabo de yapear para activar mi {plan_texto_wa} en Mi Clipper IA Studio. Mi correo registrado es: {st.session_state['usuario']}"
-                )
-                st.link_button(
-                    "📲 Enviar captura de Yape por WhatsApp",
-                    f"https://wa.me/{YAPE_WHATSAPP}?text={msg_wa}",
-                    use_container_width=True
-                )
-
-            with col_key:
-                st.markdown("#### 🔑 ¿Ya tienes tu Key?")
-                st.caption("Ingresa la clave que te enviamos tras tu pago por Yape para desbloquear tu cuenta:")
-                key_input = st.text_input("Key de activación", placeholder="Ej: CLIP-A1B2-C3D4").strip().upper()
-                if st.button("🚀 Activar mi Plan", type="primary", use_container_width=True):
-                    if not key_input:
-                        st.warning("Escribe tu key primero.")
-                    else:
-                        ok, msg = canjear_key(st.session_state["usuario"], key_input)
-                        if ok:
-                            st.success(msg)
-                            time.sleep(1.2)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-    st.stop()
-
-# ==============================================================================
-# SISTEMA DE ACTUALIZACIONES AUTOMÁTICAS
-# ==============================================================================
-VERSION_ACTUAL = "1.3.0"
-URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
-
-def revisar_actualizacion():
-    if "update_checked" in st.session_state:
-        return
-    st.session_state["update_checked"] = True
-    try:
-        req = urllib.request.Request(URL_VERSION_JSON, headers={"Cache-Control": "no-cache"})
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if data.get("version") and data["version"] != VERSION_ACTUAL:
-                st.session_state["nueva_version"] = data
-    except Exception:
-        pass
-
-@st.dialog("🚀 ¡Nueva versión disponible!")
-def mostrar_popup_actualizacion(info):
-    st.markdown(f"Tu versión actual: **`v{VERSION_ACTUAL}`** → Nueva versión: **`v{info['version']}`**")
-    if info.get("notas"):
-        st.info(f"**Novedades:** {info['notas']}")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("⬇️ Actualizar ahora", type="primary", use_container_width=True):
-            try:
-                with st.spinner("Descargando e instalando actualización..."):
-                    with urllib.request.urlopen(info["url_codigo"], timeout=10) as resp:
-                        nuevo_codigo = resp.read().decode("utf-8")
-                    Path(__file__).write_text(nuevo_codigo, encoding="utf-8")
-                st.success("¡Actualizado! Recargando programa...")
-                del st.session_state["nueva_version"]
-                time.sleep(1.5)
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo actualizar: {e}")
-    with col2:
-        if st.button("Más tarde", use_container_width=True):
-            del st.session_state["nueva_version"]
-            st.rerun()
-
-revisar_actualizacion()
-if "nueva_version" in st.session_state:
-    mostrar_popup_actualizacion(st.session_state["nueva_version"])
+es_pro, texto_plan = obtener_estado_plan(st.session_state["usuario"])
+usuario_es_admin = es_admin(st.session_state["usuario"])
 
 # --- RUTAS Y ARCHIVOS SEPARADOS POR USUARIO ---
 USER_HASH = hashlib.md5(st.session_state["usuario"].encode()).hexdigest()[:12]
@@ -693,32 +584,12 @@ USER_BASE = Path("user_data") / USER_HASH
 WORK_DIR = USER_BASE / "workspace"
 CLIPS_DIR = USER_BASE / "clips_generados"
 EDITED_DIR = USER_BASE / "clips_editados"
-CONFIG_FILE = USER_BASE / "config_clipper.json"
+USER_CONFIG_FILE = USER_BASE / "config_usuario.json"
 PROJECTS_FILE = USER_BASE / "proyectos.json"
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 EDITED_DIR.mkdir(parents=True, exist_ok=True)
-
-ESTILOS_SUBTITULOS = {
-    "Sin subtítulos": None,
-    "Dinámico (Letra grande amarilla)": "FontName=Arial Black,FontSize=20,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=55",
-    "Minimalista (Blanco limpio)": "FontName=Arial,FontSize=17,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment=2,MarginV=50",
-    "Informativo (Caja oscura)": "FontName=Arial,FontSize=17,PrimaryColour=&H00FFFFFF,BackColour=&H99000000,BorderStyle=3,Outline=1,Alignment=2,MarginV=50",
-    "Elegante (Dorado cine)": "FontName=Georgia,FontSize=17,PrimaryColour=&H0037AFD4,OutlineColour=&H00101010,BorderStyle=1,Outline=2,Alignment=2,MarginV=55",
-    "Divertido (Verde neón / Gaming)": "FontName=Impact,FontSize=21,PrimaryColour=&H0055FF33,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Alignment=2,MarginV=55",
-    "Aesthetic (Rosa suave)": "FontName=Verdana,FontSize=17,PrimaryColour=&H00CC99FF,OutlineColour=&H00201030,BorderStyle=1,Outline=2,Alignment=2,MarginV=55",
-}
-
-LAYOUTS_VIDEO = [
-    "Pantalla completa (9:16)",
-    "Imagen entera + fondo blur (9:16)",
-    "Cuadrado centrado + fondo blur (9:16)",
-    "Horizontal original (16:9)",
-    "Cuadrado (1:1)"
-]
-
-# --- PERSISTENCIA ---
 
 def cargar_json(path: Path, default):
     if path.exists():
@@ -733,10 +604,39 @@ def guardar_json(path: Path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-config = cargar_json(CONFIG_FILE, {})
+global_config = cargar_json(GLOBAL_CONFIG_FILE, {})
+user_config = cargar_json(USER_CONFIG_FILE, {})
 proyectos = cargar_json(PROJECTS_FILE, [])
 
-# --- FUNCIONES DE VIDEO, IA Y TIKTOK ---
+def obtener_gemini_key() -> str:
+    key = global_config.get("api_key", "").strip()
+    if not key:
+        try:
+            key = st.secrets.get("GEMINI_API_KEY", "").strip()
+        except Exception:
+            key = ""
+    return key
+
+# --- COLORES Y LAYOUTS ---
+COLORES_SUBTITULOS = {
+    "Amarillo viral": "&H0000FFFF",
+    "Blanco limpio": "&H00FFFFFF",
+    "Verde neón": "&H0055FF33",
+    "Cian eléctrico": "&H00FFFF00",
+    "Rosa aesthetic": "&H00CC99FF",
+    "Dorado cine": "&H0037AFD4",
+    "Naranja fuego": "&H000088FF",
+}
+
+LAYOUTS_VIDEO = [
+    "Pantalla completa (9:16)",
+    "Imagen entera + fondo blur (9:16)",
+    "Cuadrado centrado + fondo blur (9:16)",
+    "Horizontal original (16:9)",
+    "Cuadrado (1:1)"
+]
+
+# --- FUNCIONES DE VIDEO, IA, TENDENCIAS Y TIKTOK ---
 
 def descargar_video(url: str, proj_id: str) -> str:
     output_path = WORK_DIR / f"video_{proj_id}.mp4"
@@ -849,7 +749,7 @@ def buscar_momentos_ia(api_key: str, audio_path: str, instruccion_usuario: str, 
             c["end"] = round(float(c["end"]) + offset_seg, 2)
     return clips
 
-def analizar_clip_para_tiktok_ia(api_key: str, video_path: str, tono: str, contexto_extra: str = ""):
+def analizar_clip_para_redes_ia(api_key: str, video_path: str, tono: str, contexto_extra: str = ""):
     audio_temp = extraer_audio(video_path, f"tk_{datetime.now().strftime('%H%M%S')}")
     client = genai.Client(api_key=api_key)
     audio_file = client.files.upload(file=audio_temp)
@@ -858,14 +758,14 @@ def analizar_clip_para_tiktok_ia(api_key: str, video_path: str, tono: str, conte
         audio_file = client.files.get(name=audio_file.name)
 
     prompt = f"""
-    Eres un director creativo experto en viralidad de TikTok.
+    Eres un director creativo experto en viralidad de TikTok y YouTube Shorts.
     Escucha el audio de este clip y genera el mejor empaque viral posible.
     TONO DESEADO: "{tono}"
     CONTEXTO ADICIONAL DEL CREADOR (si hay): "{contexto_extra}"
 
     Devuelve exclusivamente un JSON con:
-- "gancho_visual": frase explosiva de 3 a 6 palabras (en MAYÚSCULAS) para colocar en grande arriba del video durante los primeros segundos y detener el scroll.
-- "titulos": lista de 5 títulos virales cortos para TikTok (máximo 95 caracteres cada uno, con emojis estratégicos).
+- "gancho_visual": frase explosiva de 3 a 6 palabras (en MAYÚSCULAS) para colocar en grande arriba del video.
+- "titulos": lista de 5 títulos virales cortos para TikTok y YouTube Shorts (máximo 95 caracteres cada uno, con emojis).
 - "descripcion": descripción corta con un llamado a la acción (CTA) que provoque comentarios.
 - "hashtags": cadena con 5 a 8 hashtags relevantes y de alto alcance.
     """
@@ -899,6 +799,96 @@ def analizar_clip_para_tiktok_ia(api_key: str, video_path: str, tono: str, conte
 
     return json.loads(response.text)
 
+def buscar_tendencias_tiktok_ia(api_key: str, nicho: str, region: str, detalle_extra: str = "") -> str:
+    client = genai.Client(api_key=api_key)
+    fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+    prompt = f"""
+    Hoy es {fecha_hoy}. Usa Google Search para investigar qué temas, formatos, audios y ganchos están explotando HOY en TikTok.
+    NICHO: {nicho}
+    PAÍS / REGIÓN: {region}
+    ENFOQUE EXTRA: {detalle_extra if detalle_extra.strip() else "Lo más viral y con mayor retención actual"}
+
+    Devuelve un informe claro y accionable en español con:
+    1. **🔥 Top 5 Temas / Tendencias explotando hoy** (qué está pasando y por qué genera vistas).
+    2. **🎣 5 Ganchos (Hooks) de 3 segundos** listos para copiar y pegar arriba del video.
+    3. **🎬 3 Ideas de clips exactas** adaptadas a este nicho.
+    4. **🤖 Prompt listo para copiar en el Chat IA** (una instrucción exacta para buscar momentos así en un video largo).
+    """
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
+        )
+        return response.text
+    except Exception:
+        # Respaldo si la búsqueda en vivo falla temporalmente
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt
+        )
+        return response.text
+
+def clonar_formula_viral_ia(api_key: str, tiktok_url: str):
+    proj_id = f"clon_{datetime.now().strftime('%H%M%S')}"
+    v_path = descargar_video(tiktok_url, proj_id)
+    dur = obtener_duracion_video(v_path)
+    a_path = extraer_audio(v_path, proj_id)
+
+    client = genai.Client(api_key=api_key)
+    audio_file = client.files.upload(file=a_path)
+    while audio_file.state.name == "PROCESSING":
+        time.sleep(1.5)
+        audio_file = client.files.get(name=audio_file.name)
+
+    prompt = f"""
+    Eres un experto en ingeniería inversa de videos virales de TikTok.
+    Acabas de recibir el audio de un TikTok viral de {dur} segundos.
+    Analízalo y extrae su FÓRMULA VIRAL EXACTA.
+
+    Devuelve exclusivamente un JSON con estas claves:
+- "gancho_3s": qué estrategia y frase exacta usó en los primeros 3 segundos para frenar el scroll.
+- "ritmo_cortes": cómo mantiene la atención (ritmo, cambios de energía, suspenso).
+- "duracion_ideal": duración recomendada para replicar esta fórmula (ej. "25 a 40 segundos").
+- "tono": tono emocional dominante (ej. "Misterioso y urgente", "Polémico directo", etc.).
+- "cta": qué llamado a la acción usó al final (o cómo cerró para generar comentarios).
+- "prompt_molde": una instrucción clara en español (de 2 a 3 líneas) lista para pegar en un buscador de clips IA y encontrar momentos con EXACTAMENTE esta misma fórmula en videos largos.
+- "guion_estructura": plantilla breve de 4 pasos (Gancho -> Desarrollo -> Giro -> Cierre) para crear un video o título similar.
+    """
+
+    response = None
+    for intento in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=[audio_file, prompt],
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            break
+        except Exception as e:
+            if "503" in str(e) and intento < 2:
+                time.sleep(4)
+            else:
+                try:
+                    client.files.delete(name=audio_file.name)
+                except Exception:
+                    pass
+                st.error(f"Error al analizar la fórmula con IA: {e}")
+                st.stop()
+
+    try:
+        client.files.delete(name=audio_file.name)
+        if os.path.exists(a_path):
+            os.remove(a_path)
+    except Exception:
+        pass
+
+    datos = json.loads(response.text)
+    datos["video_path"] = v_path
+    return datos
+
 def formatear_tiempo_srt(segundos: float) -> str:
     segundos = max(0.0, float(segundos))
     horas = int(segundos // 3600)
@@ -914,49 +904,78 @@ def generar_srt_clip(subtitulos: list, srt_filename: str):
     with open(srt_filename, "w", encoding="utf-8") as f:
         f.write("\n".join(lineas))
 
-def renderizar_clip(video_path: str, start: float, end: float, output_path: str, layout: str, estilo_sub: str, srt_filename: str = None):
+def renderizar_clip(
+    video_path: str,
+    start: float,
+    end: float,
+    output_path: str,
+    layout: str,
+    usar_subtitulos: bool,
+    color_sub: str = "&H00FFFFFF",
+    tamano_sub: int = 18,
+    srt_filename: str = None,
+    calidad: str = "HD (720p)",
+    con_marca_agua: bool = False
+):
     duracion = max(1.0, end - start)
-    sub_style = ESTILOS_SUBTITULOS.get(estilo_sub)
-    usar_sub = (sub_style is not None) and srt_filename and os.path.exists(srt_filename)
+    usar_sub = usar_subtitulos and srt_filename and os.path.exists(srt_filename)
+    sub_style = f"FontName=Arial Black,FontSize={tamano_sub},PrimaryColour={color_sub},OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=55"
     sub_filter = f"subtitles={srt_filename}:force_style='{sub_style}'" if usar_sub else ""
+    watermark_filter = "drawtext=text='Mi Clipper':fontcolor=white@0.55:fontsize=24:box=1:boxcolor=black@0.35:boxborderw=6:x=w-tw-20:y=20"
+
+    if con_marca_agua:
+        w_v, h_v = 540, 960
+        crf_val = "26"
+    elif calidad == "Full HD (1080p)":
+        w_v, h_v = 1080, 1920
+        crf_val = "20"
+    else:
+        w_v, h_v = 720, 1280
+        crf_val = "22"
 
     cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", video_path, "-t", str(duracion)]
 
     if layout == "Imagen entera + fondo blur (9:16)":
         fc = (
             "[0:v]split[main][bg];"
-            "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg_b];"
-            "[main]scale=1080:-2[fg];"
+            f"[bg]scale={w_v}:{h_v}:force_original_aspect_ratio=increase,crop={w_v}:{h_v},boxblur=20:5[bg_b];"
+            f"[main]scale={w_v}:-2[fg];"
             "[bg_b][fg]overlay=(W-w)/2:(H-h)/2"
         )
         if usar_sub:
             fc += f",{sub_filter}"
+        if con_marca_agua:
+            fc += f",{watermark_filter}"
         cmd += ["-filter_complex", fc]
 
     elif layout == "Cuadrado centrado + fondo blur (9:16)":
         fc = (
             "[0:v]split[main][bg];"
-            "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg_b];"
-            "[main]crop=min(iw\\,ih):min(iw\\,ih),scale=1080:1080[fg];"
+            f"[bg]scale={w_v}:{h_v}:force_original_aspect_ratio=increase,crop={w_v}:{h_v},boxblur=20:5[bg_b];"
+            f"[main]crop=min(iw\\,ih):min(iw\\,ih),scale={w_v}:{w_v}[fg];"
             "[bg_b][fg]overlay=(W-w)/2:(H-h)/2"
         )
         if usar_sub:
             fc += f",{sub_filter}"
+        if con_marca_agua:
+            fc += f",{watermark_filter}"
         cmd += ["-filter_complex", fc]
 
     else:
         filtros = []
         if layout == "Pantalla completa (9:16)":
-            filtros.append("crop=ih*9/16:ih,scale=1080:1920")
+            filtros.append(f"crop=ih*9/16:ih,scale={w_v}:{h_v}")
         elif layout == "Cuadrado (1:1)":
-            filtros.append("crop=min(iw\\,ih):min(iw\\,ih),scale=1080:1080")
+            filtros.append(f"crop=min(iw\\,ih):min(iw\\,ih),scale={w_v}:{w_v}")
         if usar_sub:
             filtros.append(sub_filter)
+        if con_marca_agua:
+            filtros.append(watermark_filter)
         if filtros:
             cmd += ["-vf", ",".join(filtros)]
 
     cmd += [
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "fast", "-crf", crf_val,
         "-c:a", "aac", "-b:a", "128k",
         output_path
     ]
@@ -994,7 +1013,7 @@ def editar_video_ffmpeg(input_path: str, output_path: str, start: float, end: fl
         cmd += ["-af", ",".join(af)]
 
     cmd += [
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "128k",
         output_path
     ]
@@ -1049,8 +1068,15 @@ def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
     return True
 
 # --- BARRA DE NAVEGACIÓN SUPERIOR SIEMPRE VISIBLE ---
-opciones_menu = ["💬 Inicio (Chat IA)", "✂️ Editor y TikTok", "📁 Mis Proyectos", "⚙️ Ajustes y API Key"]
-if es_admin(st.session_state["usuario"]):
+opciones_menu = [
+    "💬 Inicio (Chat IA)",
+    "✂️ Editor y Redes",
+    "📈 Tendencias TikTok",
+    "📁 Mis Proyectos",
+    "💎 Plan Pro / Key"
+]
+if usuario_es_admin:
+    opciones_menu.append("⚙️ Ajustes y API Key")
     opciones_menu.append("👑 Panel Admin")
 
 if st.session_state["pagina_actual"] not in opciones_menu:
@@ -1078,31 +1104,17 @@ total_clips_creados = len(list(CLIPS_DIR.glob("*.mp4"))) + len(list(EDITED_DIR.g
 
 with st.sidebar:
     st.markdown('<div class="brand-logo">⚡ Mi Clipper IA</div>', unsafe_allow_html=True)
-    st.caption(f"Studio Pro · v{VERSION_ACTUAL}")
     st.caption(f"👤 {st.session_state['usuario']}")
-    st.caption(f"💎 Plan: {texto_plan}")
-    st.divider()
-
-    if config.get("api_key"):
-        st.success("🟢 Gemini IA conectada")
+    if es_pro:
+        st.success(f"💎 {texto_plan}")
     else:
-        st.warning("🟡 Falta Gemini API Key")
-
-    if config.get("tiktok_token"):
-        st.success("🎵 TikTok API lista")
-    else:
-        st.info("🎵 TikTok: modo Studio")
-
-    if st.button("🔄 Buscar actualizaciones", use_container_width=True):
-        st.session_state.pop("update_checked", None)
-        revisar_actualizacion()
-        if "nueva_version" in st.session_state:
+        st.warning("🆓 Plan Free (con marca de agua)")
+        if st.button("🚀 Mejorar a Plan Pro", type="primary", use_container_width=True):
+            st.session_state["pagina_actual"] = "💎 Plan Pro / Key"
             st.rerun()
-        else:
-            st.toast("Ya tienes la última versión instalada.", icon="✅")
 
+    st.divider()
     if proyectos:
-        st.divider()
         st.caption("PROYECTOS RECIENTES")
         for p in proyectos[:4]:
             if st.button(f"🎬 {p['nombre'][:22]}", key=f"side_p_{p['id']}", use_container_width=True):
@@ -1120,15 +1132,18 @@ if pagina == "💬 Inicio (Chat IA)":
     st.markdown("""
     <div class="hero-box">
         <div class="hero-title">¿Qué creamos hoy? ⚡</div>
-        <div class="hero-sub">Convierte cualquier vídeo largo en clips virales con subtítulos, gancho visual y títulos IA listos para TikTok.</div>
+        <div class="hero-sub">Convierte cualquier vídeo largo en clips virales listos para TikTok y YouTube Shorts.</div>
     </div>
     """, unsafe_allow_html=True)
 
     k1, k2, k3, k4 = st.columns(4)
     k1.markdown(f'<div class="stat-card"><div class="stat-num">{total_clips_creados}</div><div class="stat-label">Clips Renderizados</div></div>', unsafe_allow_html=True)
-    k2.markdown(f'<div class="stat-card"><div class="stat-num">{len(proyectos)}</div><div class="stat-label">Proyectos Guardados</div></div>', unsafe_allow_html=True)
-    k3.markdown(f'<div class="stat-card"><div class="stat-num">{"ON" if config.get("api_key") else "OFF"}</div><div class="stat-label">Motor Gemini 3.8</div></div>', unsafe_allow_html=True)
-    k4.markdown(f'<div class="stat-card"><div class="stat-num">{"API" if config.get("tiktok_token") else "STUDIO"}</div><div class="stat-label">Modo TikTok</div></div>', unsafe_allow_html=True)
+    k2.markdown(f'<div class="stat-card"><div class="stat-num">{len(proyectos)}</div><div class="stat-label">Proyectos</div></div>', unsafe_allow_html=True)
+    k3.markdown(f'<div class="stat-card"><div class="stat-num">{"PRO" if es_pro else "FREE"}</div><div class="stat-label">Tu Plan Actual</div></div>', unsafe_allow_html=True)
+    k4.markdown(f'<div class="stat-card"><div class="stat-num">{"FULL HD" if es_pro else "480p"}</div><div class="stat-label">Calidad Máxima</div></div>', unsafe_allow_html=True)
+
+    if not es_pro:
+        st.info("🆓 Estás en **Plan Free**: tus clips se crearán con marca de agua pequeña (`Mi Clipper`) y opciones básicas. Activa el **Plan Pro** en **💎 Plan Pro / Key** para descargar en HD/Full HD sin marca de agua, editar subtítulos, publicar en TikTok/YouTube y usar el **Radar de Tendencias TikTok**.")
 
     st.write("")
 
@@ -1210,19 +1225,18 @@ if pagina == "💬 Inicio (Chat IA)":
             instruccion = st.text_area(
                 "Instrucción personalizada (opcional):",
                 value=st.session_state.get("prompt_chat", ""),
-                placeholder="p. ej. los momentos más graciosos, cada consejo sobre dinero, las opiniones más polémicas…"
+                placeholder="p. ej. los momentos más graciosos, cada consejo sobre dinero, o una fórmula clonada desde Tendencias TikTok…"
             )
 
-            a1, a2, a3, a4 = st.columns(4)
-            layout_global = a1.selectbox("📐 Encuadre", LAYOUTS_VIDEO, index=0)
-            estilo_sub_global = a2.selectbox("💬 Subtítulos", list(ESTILOS_SUBTITULOS.keys()), index=1)
-            num_clips = a3.slider("🎞️ Cantidad", 1, 10, 3)
-            duracion_obj = a4.selectbox("⏱️ Duración", ["15 a 30 segundos", "30 a 60 segundos", "60 a 90 segundos"], index=1)
+            max_clips = 10 if es_pro else 3
+            a1, a2 = st.columns(2)
+            num_clips = a1.slider(f"🎞️ Cantidad de clips ({'máx 10 Pro' if es_pro else 'máx 3 en Free'})", 1, max_clips, min(3, max_clips))
+            duracion_obj = a2.selectbox("⏱️ Duración", ["15 a 30 segundos", "30 a 60 segundos", "60 a 90 segundos"], index=1)
 
             if st.button("🚀 Buscar momentos con IA", type="primary", use_container_width=True):
-                api_key = config.get("api_key", "")
+                api_key = obtener_gemini_key()
                 if not api_key:
-                    st.error("Primero guarda tu Gemini API Key en '⚙️ Ajustes y API Key'.")
+                    st.error("El administrador aún no ha configurado la API Key de Gemini.")
                 else:
                     with st.spinner("La IA está escuchando tu vídeo y detectando los mejores clips…"):
                         clips = buscar_momentos_ia(
@@ -1259,37 +1273,44 @@ if pagina == "💬 Inicio (Chat IA)":
                 col_info, col_render = st.columns([1.8, 1.2])
                 with col_info:
                     st.markdown(f'<span class="viral-badge">🔥 Viralidad {clip["puntaje_viral"]}/100</span>', unsafe_allow_html=True)
-                    if clip.get("gancho_visual"):
-                        st.markdown(f"**🎯 Gancho visual sugerido:** `{clip['gancho_visual']}`")
                     st.write(f"**Por qué funciona:** {clip['motivo']}")
-                    st.info(f"**Magic Post (Copy para redes):**\n\n{clip['descripcion_redes']}")
 
-                    t1, t2 = st.columns(2)
-                    inicio = t1.number_input("Inicio (seg)", value=float(clip["start"]), key=f"start_{i}")
-                    fin = t2.number_input("Fin (seg)", value=float(clip["end"]), key=f"end_{i}")
+                    if es_pro:
+                        if clip.get("gancho_visual"):
+                            st.markdown(f"**🎯 Gancho visual sugerido:** `{clip['gancho_visual']}`")
+                        st.info(f"**Magic Post (Copy para TikTok / YouTube):**\n\n{clip['descripcion_redes']}")
 
-                    o1, o2 = st.columns(2)
-                    layout_clip = o1.selectbox(
-                        "Encuadre",
-                        LAYOUTS_VIDEO,
-                        index=LAYOUTS_VIDEO.index(layout_global) if "layout_global" in locals() else 0,
-                        key=f"lay_{i}"
-                    )
-                    estilo_clip = o2.selectbox(
-                        "Subtítulos",
-                        list(ESTILOS_SUBTITULOS.keys()),
-                        index=list(ESTILOS_SUBTITULOS.keys()).index(estilo_sub_global) if "estilo_sub_global" in locals() else 1,
-                        key=f"substyle_{i}"
-                    )
+                        t1, t2 = st.columns(2)
+                        inicio = t1.number_input("Inicio (seg)", value=float(clip["start"]), key=f"start_{i}")
+                        fin = t2.number_input("Fin (seg)", value=float(clip["end"]), key=f"end_{i}")
+
+                        o1, o2 = st.columns(2)
+                        layout_clip = o1.selectbox("📐 Encuadre", LAYOUTS_VIDEO, index=0, key=f"lay_{i}")
+                        calidad_clip = o2.selectbox("📺 Calidad de descarga", ["HD (720p)", "Full HD (1080p)"], index=1, key=f"cal_{i}")
+
+                        s1, s2, s3 = st.columns(3)
+                        usar_sub = s1.checkbox("💬 Con subtítulos", value=True, key=f"usub_{i}")
+                        color_nombre = s2.selectbox("🎨 Color subtítulos", list(COLORES_SUBTITULOS.keys()), index=0, key=f"col_{i}")
+                        tamano_sub = s3.slider("🔠 Tamaño letra", 14, 28, 20, key=f"tam_{i}")
+                        color_ass = COLORES_SUBTITULOS[color_nombre]
+                    else:
+                        inicio = float(clip["start"])
+                        fin = float(clip["end"])
+                        layout_clip = "Pantalla completa (9:16)"
+                        calidad_clip = "480p (Free)"
+                        usar_sub = False
+                        color_ass = "&H00FFFFFF"
+                        tamano_sub = 18
+                        st.caption("🔒 Recorte manual, reencuadre, subtítulos de colores/tamaño y descarga HD/Full HD sin marca de agua están disponibles solo en **Plan Pro**.")
 
                 with col_render:
                     proj_id = st.session_state.get("proj_id", "local")
                     out_file = str(CLIPS_DIR / f"{proj_id}_clip_{i+1}.mp4")
 
                     if st.button(f"✂️ Crear Clip #{i+1}", type="primary", use_container_width=True, key=f"render_{i}"):
-                        with st.spinner("Renderizando clip en HD…"):
+                        with st.spinner("Renderizando clip…"):
                             srt_temp = None
-                            if estilo_clip != "Sin subtítulos" and clip.get("subtitulos"):
+                            if usar_sub and clip.get("subtitulos"):
                                 srt_temp = str(WORK_DIR / f"temp_sub_{i+1}.srt")
                                 generar_srt_clip(clip["subtitulos"], srt_temp)
 
@@ -1297,18 +1318,23 @@ if pagina == "💬 Inicio (Chat IA)":
                                 st.session_state["video_path"],
                                 inicio, fin, out_file,
                                 layout=layout_clip,
-                                estilo_sub=estilo_clip,
-                                srt_filename=srt_temp
+                                usar_subtitulos=usar_sub,
+                                color_sub=color_ass,
+                                tamano_sub=tamano_sub,
+                                srt_filename=srt_temp,
+                                calidad=calidad_clip,
+                                con_marca_agua=(not es_pro)
                             )
                             if srt_temp and os.path.exists(srt_temp):
                                 os.remove(srt_temp)
-                        st.success("¡Listo! Ya puedes abrirlo en '✂️ Editor y TikTok'.")
+                        st.success("¡Clip listo!")
 
                     if os.path.exists(out_file):
                         st.video(out_file)
+                        etiqueta_dl = f"⬇️ Descargar {calidad_clip}" if es_pro else "⬇️ Descargar (con marca de agua)"
                         with open(out_file, "rb") as f:
                             st.download_button(
-                                label="⬇️ Descargar MP4",
+                                label=etiqueta_dl,
                                 data=f,
                                 file_name=f"clip_{i+1}_{proj_id}.mp4",
                                 mime="video/mp4",
@@ -1317,15 +1343,29 @@ if pagina == "💬 Inicio (Chat IA)":
                             )
 
 # ==============================================================================
-# PÁGINA 2: EDITOR DE VIDEO + AUTO GANCHO/TÍTULOS IA + TIKTOK
+# PÁGINA 2: EDITOR DE VIDEO + TÍTULOS IA + TIKTOK & YOUTUBE (SOLO PRO)
 # ==============================================================================
-elif pagina == "✂️ Editor y TikTok":
+elif pagina == "✂️ Editor y Redes":
     st.markdown("""
     <div class="hero-box">
-        <div class="hero-title">Editor Studio & TikTok 🎵</div>
-        <div class="hero-sub">La IA escucha tu clip, crea el Gancho visual y los Títulos virales por ti, lo editas y lo subes directo.</div>
+        <div class="hero-title">Editor Studio & Publicación 🎵</div>
+        <div class="hero-sub">Recorta, quema ganchos visuales, genera Títulos IA y publica en TikTok y YouTube.</div>
     </div>
     """, unsafe_allow_html=True)
+
+    if not es_pro:
+        with st.container(border=True):
+            st.warning("🔒 **Función exclusiva del Plan Pro**")
+            st.markdown("""
+            Con el **Plan Pro** desbloqueas:
+            - ✂️ Editor avanzado (recortar, velocidad, brillo, contraste y gancho visual)
+            - ✨ Generador automático de **5 Títulos Virales + Descripción + Hashtags con IA**
+            - 🚀 Publicación directa en **TikTok y YouTube** con el texto ya escrito
+            """)
+            if st.button("💎 Activar Plan Pro ahora", type="primary"):
+                st.session_state["pagina_actual"] = "💎 Plan Pro / Key"
+                st.rerun()
+        st.stop()
 
     clips_disponibles = sorted(list(CLIPS_DIR.glob("*.mp4")) + list(EDITED_DIR.glob("*.mp4")), key=os.path.getmtime, reverse=True)
     opciones_video = [str(p) for p in clips_disponibles]
@@ -1354,15 +1394,15 @@ elif pagina == "✂️ Editor y TikTok":
             st.markdown("### Que la IA escuche tu clip y cree el Gancho + Títulos")
             g1, g2 = st.columns([1.2, 2])
             tono_video = g1.selectbox("Estilo / Tono viral", ["Curioso / Misterio", "Gracioso / Dinámico", "Polémico / Debate", "Educativo / Directo"])
-            contexto_extra = g2.text_input("Nota extra para la IA (opcional — puedes dejarlo vacío):", placeholder="Ej: Enfócate en el giro del final...")
+            contexto_extra = g2.text_input("Nota extra para la IA (opcional):", placeholder="Ej: Enfócate en el giro del final...")
 
             if st.button("✨ Analizar este clip con IA (Auto-Gancho + 5 Títulos)", type="primary", use_container_width=True):
-                api_key = config.get("api_key", "")
+                api_key = obtener_gemini_key()
                 if not api_key:
-                    st.error("Guarda tu Gemini API Key en Ajustes primero.")
+                    st.error("El administrador aún no ha configurado la API Key de Gemini.")
                 else:
                     with st.spinner("La IA está escuchando tu clip para crear el Gancho visual y los Títulos..."):
-                        res_ia = analizar_clip_para_tiktok_ia(api_key, video_elegido, tono_video, contexto_extra)
+                        res_ia = analizar_clip_para_redes_ia(api_key, video_elegido, tono_video, contexto_extra)
                         st.session_state["tiktok_ia"] = res_ia
                         st.session_state["hook_auto"] = res_ia.get("gancho_visual", "")
                     st.success("¡Gancho visual y títulos generados automáticamente!")
@@ -1390,14 +1430,14 @@ elif pagina == "✂️ Editor y TikTok":
 
                 brillo = st.slider("Brillo", -0.3, 0.3, 0.0, 0.02)
                 texto_hook = st.text_input(
-                    "🎯 Texto Gancho (Hook) arriba del video (rellenado por la IA):",
+                    "🎯 Texto Gancho (Hook) arriba del video:",
                     value=st.session_state.get("hook_auto", ""),
                     placeholder="Presiona el botón de IA arriba o escribe tu propio gancho..."
                 )
 
                 if st.button("✂️ Aplicar edición y quemar Gancho en el video", type="primary", use_container_width=True):
                     nombre_editado = str(EDITED_DIR / f"editado_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
-                    with st.spinner("Aplicando edición con FFmpeg..."):
+                    with st.spinner("Aplicando edición en Full HD..."):
                         editar_video_ffmpeg(
                             video_elegido, nombre_editado, ed_ini, ed_fin,
                             velocidad, volumen, brillo, contraste, texto_hook
@@ -1407,15 +1447,15 @@ elif pagina == "✂️ Editor y TikTok":
                     st.rerun()
 
         with st.container(border=True):
-            st.markdown('<span class="step-pill">PUBLICAR EN TIKTOK</span>', unsafe_allow_html=True)
+            st.markdown('<span class="step-pill">PUBLICAR EN TIKTOK Y YOUTUBE</span>', unsafe_allow_html=True)
             titulo_final = ""
             if "tiktok_ia" in st.session_state:
                 datos_tk = st.session_state["tiktok_ia"]
                 titulo_elegido = st.radio("🏆 Elige uno de los 5 títulos generados por la IA:", datos_tk["titulos"])
                 caption_sugerido = f"{titulo_elegido}\n\n{datos_tk['descripcion']}\n\n{datos_tk['hashtags']}"
-                titulo_final = st.text_area("📝 Copy final para TikTok:", value=caption_sugerido, height=130)
+                titulo_final = st.text_area("📝 Texto final para TikTok / YouTube Shorts:", value=caption_sugerido, height=130)
             else:
-                titulo_final = st.text_area("📝 Copy para TikTok (usa el botón de IA arriba para generarlo solo):", height=100)
+                titulo_final = st.text_area("📝 Texto para TikTok / YouTube (usa el botón de IA arriba para generarlo solo):", height=100)
 
             video_final_subir = st.session_state.get("video_editado_actual", video_elegido)
             if not os.path.exists(video_final_subir):
@@ -1423,33 +1463,133 @@ elif pagina == "✂️ Editor y TikTok":
 
             b1, b2, b3 = st.columns(3)
             with b1:
-                if st.button("🚀 Subir directo a TikTok (API)", type="primary", use_container_width=True):
-                    tk_token = config.get("tiktok_token", "").strip()
-                    if not tk_token:
-                        st.warning("Falta tu Access Token de TikTok en Ajustes. Descarga el clip y súbelo en TikTok Studio.")
-                    else:
-                        try:
-                            with st.spinner("Subiendo video a tu TikTok..."):
-                                subir_video_tiktok_api(tk_token, video_final_subir, titulo_final)
-                            st.success("¡Enviado a tu cuenta de TikTok! Revisa tu Bandeja de entrada / Borradores en la app.")
-                        except Exception as e:
-                            st.error(f"Error al subir vía API: {e}")
-
-            with b2:
                 with open(video_final_subir, "rb") as f:
                     st.download_button(
-                        "⬇️ Descargar clip final",
+                        "⬇️ Descargar HD sin marca",
                         data=f,
                         file_name=Path(video_final_subir).name,
                         mime="video/mp4",
+                        type="primary",
                         use_container_width=True
                     )
-
+            with b2:
+                st.link_button("🎵 Publicar en TikTok Studio", "https://www.tiktok.com/tiktokstudio/upload", use_container_width=True)
             with b3:
-                st.link_button("🌐 Abrir TikTok Studio", "https://www.tiktok.com/tiktokstudio/upload", use_container_width=True)
+                st.link_button("▶️ Publicar en YouTube Studio", "https://studio.youtube.com/channel/UC/videos/upload", use_container_width=True)
+
+            with st.expander("🔌 Opcional: Subida directa a TikTok por API"):
+                tk_tok = st.text_input("Tu TikTok Access Token:", value=user_config.get("tiktok_token", ""), type="password")
+                if st.button("🚀 Subir directo a TikTok (API)"):
+                    if not tk_tok.strip():
+                        st.warning("Ingresa tu TikTok Access Token.")
+                    else:
+                        user_config["tiktok_token"] = tk_tok.strip()
+                        guardar_json(USER_CONFIG_FILE, user_config)
+                        try:
+                            with st.spinner("Subiendo video a tu TikTok..."):
+                                subir_video_tiktok_api(tk_tok.strip(), video_final_subir, titulo_final)
+                            st.success("¡Enviado a tu cuenta de TikTok! Revisa tus borradores.")
+                        except Exception as e:
+                            st.error(f"Error al subir vía API: {e}")
 
 # ==============================================================================
-# PÁGINA 3: MIS PROYECTOS
+# PÁGINA 3: RADAR DE TENDENCIAS TIKTOK + CLONADOR DE FÓRMULA VIRAL (SOLO PRO)
+# ==============================================================================
+elif pagina == "📈 Tendencias TikTok":
+    st.markdown("""
+    <div class="hero-box">
+        <div class="hero-title">Radar de Tendencias TikTok 📈</div>
+        <div class="hero-sub">Descubre qué está explotando hoy en tiempo real o clona la fórmula exacta de cualquier TikTok viral.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not es_pro:
+        with st.container(border=True):
+            st.warning("🔒 **Función exclusiva del Plan Pro**")
+            st.markdown("""
+            Activa tu **Plan Pro** para desbloquear el **Radar de Tendencias TikTok**:
+            - 🔎 **Buscador de Tendencias en Vivo:** la IA busca en tiempo real qué temas, formatos y ganchos están explotando hoy en tu nicho y país.
+            - 🧬 **Clonador de Fórmula Viral:** pega el link de cualquier TikTok viral, extrae su gancho de 3 segundos, ritmo y CTA, y úsalo como molde en tus propios videos con un clic.
+            """)
+            if st.button("💎 Activar Plan Pro ahora", type="primary"):
+                st.session_state["pagina_actual"] = "💎 Plan Pro / Key"
+                st.rerun()
+        st.stop()
+
+    tab_vivo, tab_clonar = st.tabs(["🔎 Buscador de Tendencias en Vivo", "🧬 Clonador de Fórmula Viral"])
+
+    # --- SUB-PESTAÑA 1: BUSCADOR EN VIVO ---
+    with tab_vivo:
+        with st.container(border=True):
+            st.markdown('<span class="step-pill">GEMINI + GOOGLE SEARCH EN VIVO</span>', unsafe_allow_html=True)
+            st.markdown("### ¿Qué está explotando hoy en TikTok?")
+            t1, t2 = st.columns(2)
+            nicho = t1.selectbox(
+                "🎯 Elige tu nicho:",
+                ["Misterio / Terror / True Crime", "Humor / Entretenimiento", "Finanzas / Negocios / Cripto", "Gaming / Streamers", "Noticias / Polémica", "Salud / Fitness", "Tecnología / IA", "Historias / Podcasts"]
+            )
+            region = t2.selectbox(
+                "🌎 País / Región:",
+                ["Perú", "Latinoamérica (General)", "México", "Colombia", "Argentina", "España", "Estados Unidos (Español)", "Estados Unidos (Inglés)"]
+            )
+            extra_trend = st.text_input("Tema específico (opcional):", placeholder="Ej: historias de terror cortas, reacciones de streamers, consejos de ahorro...")
+
+            if st.button("📡 Escanear tendencias de hoy", type="primary", use_container_width=True):
+                api_key = obtener_gemini_key()
+                if not api_key:
+                    st.error("El administrador aún no ha configurado la API Key de Gemini.")
+                else:
+                    with st.spinner(f"Buscando tendencias reales de {nicho} en {region}..."):
+                        resultado_trend = buscar_tendencias_tiktok_ia(api_key, nicho, region, extra_trend)
+                        st.session_state["resultado_tendencias"] = resultado_trend
+
+        if "resultado_tendencias" in st.session_state:
+            with st.container(border=True):
+                st.markdown(st.session_state["resultado_tendencias"])
+
+    # --- SUB-PESTAÑA 2: CLONADOR DE FÓRMULA VIRAL ---
+    with tab_clonar:
+        with st.container(border=True):
+            st.markdown('<span class="step-pill">INGENIERÍA INVERSA VIRAL</span>', unsafe_allow_html=True)
+            st.markdown("### Clona la fórmula de un TikTok en tendencia")
+            url_tk = st.text_input("🔗 Pega el link del TikTok viral aquí:", placeholder="https://www.tiktok.com/@usuario/video/...")
+
+            if st.button("🧬 Analizar y extraer fórmula viral", type="primary", use_container_width=True):
+                api_key = obtener_gemini_key()
+                if not api_key:
+                    st.error("El administrador aún no ha configurado la API Key de Gemini.")
+                elif not url_tk.strip():
+                    st.warning("Pega un enlace de TikTok primero.")
+                else:
+                    with st.spinner("Descargando TikTok y aplicando ingeniería inversa con IA..."):
+                        formula = clonar_formula_viral_ia(api_key, url_tk.strip())
+                        st.session_state["formula_clonada"] = formula
+                    st.success("¡Fórmula viral extraída con éxito!")
+
+        if "formula_clonada" in st.session_state:
+            f = st.session_state["formula_clonada"]
+            with st.container(border=True):
+                col_v, col_f = st.columns([1, 1.6])
+                with col_v:
+                    if f.get("video_path") and os.path.exists(f["video_path"]):
+                        st.video(f["video_path"])
+                with col_f:
+                    st.markdown(f"**🎣 Gancho (primeros 3 seg):** {f.get('gancho_3s', '')}")
+                    st.markdown(f"**⚡ Ritmo y cortes:** {f.get('ritmo_cortes', '')}")
+                    st.markdown(f"**⏱️ Duración ideal:** {f.get('duracion_ideal', '')}")
+                    st.markdown(f"**🎭 Tono:** {f.get('tono', '')}")
+                    st.markdown(f"**💬 Llamado a la acción (CTA):** {f.get('cta', '')}")
+                    st.info(f"**📋 Estructura / Guion molde:**\n\n{f.get('guion_estructura', '')}")
+                    st.markdown("**🤖 Prompt molde listo para tus videos largos:**")
+                    st.code(f.get("prompt_molde", ""), language="text")
+
+                    if st.button("🎯 Usar esta fórmula en Inicio (Chat IA)", type="primary", use_container_width=True):
+                        st.session_state["prompt_chat"] = f.get("prompt_molde", "")
+                        st.session_state["pagina_actual"] = "💬 Inicio (Chat IA)"
+                        st.rerun()
+
+# ==============================================================================
+# PÁGINA 4: MIS PROYECTOS
 # ==============================================================================
 elif pagina == "📁 Mis Proyectos":
     st.markdown("""
@@ -1479,44 +1619,118 @@ elif pagina == "📁 Mis Proyectos":
                     st.rerun()
 
 # ==============================================================================
-# PÁGINA 4: AJUSTES Y API KEY
+# PÁGINA 5: PLAN PRO / ACTIVAR KEY (YAPE + CANJE)
 # ==============================================================================
-elif pagina == "⚙️ Ajustes y API Key":
+elif pagina == "💎 Plan Pro / Key":
+    _, col_pay, _ = st.columns([0.4, 2.4, 0.4])
+    with col_pay:
+        with st.container(border=True):
+            st.markdown('<span class="step-pill">ÚLTIMO PASO</span>', unsafe_allow_html=True)
+            st.markdown('<div class="hero-title" style="text-align:left; font-size:2.2rem;">Consigue los clips de tu vídeo</div>', unsafe_allow_html=True)
+            st.write("")
+
+            st.markdown("""
+            <div class="benefit-item">✅ Los mejores momentos de todo tu vídeo, encontrados y ordenados</div>
+            <div class="benefit-item">✅ Descarga en HD y Full HD sin marca de agua</div>
+            <div class="benefit-item">✅ Cambia cualquier clip: recórtalo, reencuádralo, cambia los subtítulos (colores y tamaño)</div>
+            <div class="benefit-item">✅ Publica en TikTok y YouTube desde Mi Clipper IA Studio, con el texto escrito por IA</div>
+            <div class="benefit-item">✅ <b>Radar de Tendencias de TikTok en vivo + Clonador de Fórmula Viral con IA</b></div>
+            """, unsafe_allow_html=True)
+
+            st.write("")
+            es_anual = st.toggle("Descuento anual (61%)", value=True, key="toggle_descuento_anual")
+
+            if es_anual:
+                st.markdown("""
+                <div class="price-box">
+                    <div style="font-size:1.05rem; font-weight:700; color:#e2e8f0;">Clips / Anual</div>
+                    <div style="margin-top:0.5rem;">
+                        <span style="text-decoration:line-through; color:#94a3b8; font-size:1.1rem;">$227.88</span>
+                        <span style="font-size:2rem; font-weight:800; color:#ffffff; margin-left:8px;">$7.50</span>
+                        <span style="color:#cbd5e1;">/mes</span>
+                        <span class="discount-pill">61% de descuento</span>
+                    </div>
+                    <div style="color:#94a3b8; font-size:0.88rem; margin-top:0.3rem;">Facturación anual · $89.99/año</div>
+                </div>
+                """, unsafe_allow_html=True)
+                plan_texto_wa = "Plan Anual ($89.99/año)"
+            else:
+                st.markdown("""
+                <div class="price-box">
+                    <div style="font-size:1.05rem; font-weight:700; color:#e2e8f0;">Clips / Mensual</div>
+                    <div style="margin-top:0.5rem;">
+                        <span style="font-size:2rem; font-weight:800; color:#ffffff;">$19.00</span>
+                        <span style="color:#cbd5e1;">/mes</span>
+                    </div>
+                    <div style="color:#94a3b8; font-size:0.88rem; margin-top:0.3rem;">Facturación mensual · Cancela cuando quieras</div>
+                </div>
+                """, unsafe_allow_html=True)
+                plan_texto_wa = "Plan Mensual ($19.00/mes)"
+
+            col_yape, col_key = st.columns(2)
+
+            with col_yape:
+                st.markdown(f"""
+                <div class="yape-card">
+                    <div style="font-size:0.85rem; color:#e9d5ff; font-weight:700;">PAGA CON YAPE</div>
+                    <div style="font-size:1.55rem; font-weight:800; color:#ffffff; margin:0.4rem 0;">{YAPE_NUMERO}</div>
+                    <div style="font-size:0.85rem; color:#cbd5e1;">Realiza tu Yape y envíanos la captura por WhatsApp para entregarte tu Key de acceso al instante.</div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.write("")
+                msg_wa = urllib.parse.quote(
+                    f"Hola! Acabo de yapear para activar mi {plan_texto_wa} en Mi Clipper IA Studio. Mi correo registrado es: {st.session_state['usuario']}"
+                )
+                st.link_button(
+                    "📲 Enviar captura de Yape por WhatsApp",
+                    f"https://wa.me/{YAPE_WHATSAPP}?text={msg_wa}",
+                    use_container_width=True
+                )
+
+            with col_key:
+                st.markdown("#### 🔑 ¿Ya tienes tu Key?")
+                st.caption("Ingresa la clave que te enviamos tras tu pago por Yape para activar tu Plan Pro:")
+                key_input = st.text_input("Key de activación", placeholder="Ej: CLIP-A1B2-C3D4", key="input_canjear_key").strip().upper()
+                if st.button("🚀 Activar mi Plan", type="primary", use_container_width=True):
+                    if not key_input:
+                        st.warning("Escribe tu key primero.")
+                    else:
+                        ok, msg = canjear_key(st.session_state["usuario"], key_input)
+                        if ok:
+                            st.success(msg)
+                            time.sleep(1.2)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+# ==============================================================================
+# PÁGINA 6: AJUSTES Y API KEY (SOLO ADMINISTRADORES)
+# ==============================================================================
+elif pagina == "⚙️ Ajustes y API Key" and usuario_es_admin:
     st.markdown("""
     <div class="hero-box">
-        <div class="hero-title">Ajustes del Studio ⚙️</div>
-        <div class="hero-sub">Configura tus claves una sola vez para tu cuenta.</div>
+        <div class="hero-title">Ajustes Globales del Studio ⚙️</div>
+        <div class="hero-sub">Solo visible para Administradores. La API Key que guardes aquí servirá para todos tus usuarios.</div>
     </div>
     """, unsafe_allow_html=True)
 
     with st.container(border=True):
-        st.markdown("#### 🔑 Clave de Inteligencia Artificial (Gemini)")
+        st.markdown("#### 🔑 Clave Global de Inteligencia Artificial (Gemini)")
         nueva_key = st.text_input(
-            "Gemini API Key",
-            value=config.get("api_key", ""),
+            "Gemini API Key (Global para toda la plataforma)",
+            value=global_config.get("api_key", ""),
             type="password",
             placeholder="Pega aquí tu clave de Google AI Studio"
         )
 
-        st.divider()
-        st.markdown("#### 🎵 Conexión con tu cuenta de TikTok (API Oficial)")
-        st.caption("Obtén tu Access Token en developers.tiktok.com con el permiso `video.upload`.")
-        nuevo_tk_token = st.text_input(
-            "TikTok Access Token",
-            value=config.get("tiktok_token", ""),
-            type="password",
-            placeholder="Pega aquí tu Access Token de TikTok..."
-        )
-
-        if st.button("💾 Guardar todas las claves", type="primary"):
-            config["api_key"] = nueva_key.strip()
-            config["tiktok_token"] = nuevo_tk_token.strip()
-            guardar_json(CONFIG_FILE, config)
-            st.success("¡Claves guardadas!")
+        if st.button("💾 Guardar API Key Global", type="primary"):
+            global_config["api_key"] = nueva_key.strip()
+            guardar_json(GLOBAL_CONFIG_FILE, global_config)
+            st.success("¡API Key global guardada! Ya funciona para todos los usuarios.")
 
     with st.container(border=True):
         st.markdown("#### 🧹 Limpieza de archivos temporales")
-        if st.button("Vaciar carpeta workspace (videos descargados)"):
+        if st.button("Vaciar mi carpeta workspace"):
             for f in WORK_DIR.glob("*"):
                 try:
                     f.unlink()
@@ -1525,13 +1739,13 @@ elif pagina == "⚙️ Ajustes y API Key":
             st.success("Carpeta temporal limpiada.")
 
 # ==============================================================================
-# PÁGINA 5: PANEL ADMIN (GENERAR KEYS Y GESTIONAR USUARIOS)
+# PÁGINA 7: PANEL ADMIN (GENERAR KEYS CON O SIN ADMIN Y GESTIONAR USUARIOS)
 # ==============================================================================
-elif pagina == "👑 Panel Admin" and es_admin(st.session_state["usuario"]):
+elif pagina == "👑 Panel Admin" and usuario_es_admin:
     st.markdown("""
     <div class="hero-box">
         <div class="hero-title">Panel de Administrador 👑</div>
-        <div class="hero-sub">Genera keys de activación para tus clientes de Yape y administra sus accesos.</div>
+        <div class="hero-sub">Genera keys de activación para tus clientes de Yape y administra roles y accesos.</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1540,7 +1754,7 @@ elif pagina == "👑 Panel Admin" and es_admin(st.session_state["usuario"]):
     with tab_keys:
         with st.container(border=True):
             st.markdown("#### ✨ Generar nueva Key de licencia")
-            col_d, col_b = st.columns([2, 1])
+            col_d, col_adm, col_b = st.columns([2, 1.3, 1])
             opciones_duracion = {
                 "Plan Mensual (30 días)": 30,
                 "Plan Trimestral (90 días)": 90,
@@ -1548,11 +1762,15 @@ elif pagina == "👑 Panel Admin" and es_admin(st.session_state["usuario"]):
                 "Acceso Ilimitado (De por vida)": 0
             }
             seleccion = col_d.selectbox("Duración del plan:", list(opciones_duracion.keys()))
+            with col_adm:
+                st.write("")
+                st.write("")
+                incluir_admin = st.checkbox("👑 Dar Panel Admin", value=False)
             with col_b:
                 st.write("")
                 st.write("")
                 if st.button("⚡ Generar Key", type="primary", use_container_width=True):
-                    nueva_clave = generar_nueva_key(opciones_duracion[seleccion])
+                    nueva_clave = generar_nueva_key(opciones_duracion[seleccion], da_admin=incluir_admin)
                     st.session_state["ultima_key_generada"] = nueva_clave
 
             if "ultima_key_generada" in st.session_state:
@@ -1565,12 +1783,13 @@ elif pagina == "👑 Panel Admin" and es_admin(st.session_state["usuario"]):
             if not keys:
                 st.info("Aún no has generado ninguna key.")
             else:
-                for clave, dias, usada_por, f_crea, f_uso in keys:
+                for clave, dias, da_adm, usada_por, f_crea, f_uso in keys:
                     dur_txt = "Ilimitado" if dias == 0 else f"{dias} días"
+                    adm_badge = " · 👑 **+ADMIN**" if da_adm else ""
                     if usada_por:
-                        st.markdown(f"🔴 **`{clave}`** · `{dur_txt}` · Usada por **{usada_por}** ({f_uso})")
+                        st.markdown(f"🔴 **`{clave}`** · `{dur_txt}`{adm_badge} · Usada por **{usada_por}** ({f_uso})")
                     else:
-                        st.markdown(f"🟢 **`{clave}`** · `{dur_txt}` · **Disponible** _(creada {f_crea})_")
+                        st.markdown(f"🟢 **`{clave}`** · `{dur_txt}`{adm_badge} · **Disponible** _(creada {f_crea})_")
 
     with tab_users:
         with st.container(border=True):
@@ -1579,17 +1798,31 @@ elif pagina == "👑 Panel Admin" and es_admin(st.session_state["usuario"]):
             if not usuarios:
                 st.info("No hay usuarios registrados todavía.")
             else:
-                for email_u, activo_u, expira_u in usuarios:
-                    c1, c2, c3, c4 = st.columns([2.5, 1.5, 1, 1])
-                    estado = f"🟢 Activo ({expira_u})" if activo_u else "🔴 Sin plan"
-                    if es_admin(email_u):
-                        estado = "👑 ADMIN"
+                for email_u, activo_u, expira_u, es_adm_u in usuarios:
+                    c1, c2, c3, c4, c5 = st.columns([2.2, 1.4, 0.9, 0.9, 1.1])
+                    if es_admin_super(email_u):
+                        estado = "👑 SUPER ADMIN"
+                    elif es_adm_u:
+                        estado = f"👑 ADMIN ({expira_u or 'Pro'})"
+                    elif activo_u:
+                        estado = f"🟢 Pro ({expira_u})"
+                    else:
+                        estado = "🆓 Free"
+
                     c1.markdown(f"**{email_u}**")
                     c2.markdown(estado)
-                    if not es_admin(email_u):
-                        if c3.button("✅ +30 días", key=f"act_{email_u}", use_container_width=True):
+                    if not es_admin_super(email_u):
+                        if c3.button("✅ +30d", key=f"act_{email_u}", use_container_width=True):
                             actualizar_acceso_manual(email_u, True, 30)
                             st.rerun()
-                        if c4.button("🚫 Quitar", key=f"rev_{email_u}", use_container_width=True):
+                        if c4.button("🚫 Free", key=f"rev_{email_u}", use_container_width=True):
                             actualizar_acceso_manual(email_u, False)
                             st.rerun()
+                        if es_adm_u:
+                            if c5.button("Quitar Admin", key=f"no_adm_{email_u}", use_container_width=True):
+                                cambiar_rol_admin(email_u, False)
+                                st.rerun()
+                        else:
+                            if c5.button("👑 Hacer Admin", key=f"si_adm_{email_u}", use_container_width=True):
+                                cambiar_rol_admin(email_u, True)
+                                st.rerun()
