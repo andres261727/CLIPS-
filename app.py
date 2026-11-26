@@ -28,7 +28,7 @@ st.set_page_config(
 ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]
 YAPE_NUMERO = "+51 953 027 160"
 YAPE_WHATSAPP = "51953027160"
-VERSION_ACTUAL = "1.4.8"
+VERSION_ACTUAL = "1.5.0"
 URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
 MODELOS_GEMINI = ["gemini-3.8-flash"]
 
@@ -280,6 +280,48 @@ st.markdown("""
         font-weight: 700;
         margin-left: 4px;
     }
+
+    /* Comunidad */
+    .avatar-circle {
+        width: 40px;
+        height: 40px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, #7c3aed, #ec4899);
+        color: #ffffff;
+        font-weight: 800;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        flex-shrink: 0;
+    }
+    .mini-avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        background: rgba(124, 58, 237, 0.35);
+        border: 1px solid rgba(192, 132, 252, 0.5);
+        color: #f8fafc;
+        font-size: 0.75rem;
+        font-weight: 700;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-right: 4px;
+    }
+    .comm-stat-box {
+        text-align: center;
+        padding: 0.4rem 0.2rem;
+    }
+    .comm-stat-val {
+        font-size: 1.25rem;
+        font-weight: 800;
+        color: #ffffff;
+    }
+    .comm-stat-lbl {
+        font-size: 0.75rem;
+        color: #94a3b8;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -341,7 +383,7 @@ if "nueva_version" in st.session_state:
         st.session_state.pop("nueva_version", None)
 
 # ==============================================================================
-# BASE DE DATOS: USUARIOS, PLANES (FREE / PRO / SUPER_PRO), ROLES ADMIN Y KEYS
+# BASE DE DATOS: USUARIOS, PLANES, KEYS Y COMUNIDAD
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect("usuarios.db")
@@ -353,14 +395,16 @@ def init_db():
             plan_activo INTEGER DEFAULT 0,
             plan_tipo TEXT DEFAULT 'FREE',
             plan_expira TEXT,
-            es_admin INTEGER DEFAULT 0
+            es_admin INTEGER DEFAULT 0,
+            apodo TEXT
         )
     """)
     for col_def in (
         "plan_activo INTEGER DEFAULT 0",
         "plan_tipo TEXT DEFAULT 'FREE'",
         "plan_expira TEXT",
-        "es_admin INTEGER DEFAULT 0"
+        "es_admin INTEGER DEFAULT 0",
+        "apodo TEXT"
     ):
         try:
             c.execute(f"ALTER TABLE usuarios ADD COLUMN {col_def}")
@@ -384,6 +428,37 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS comunidad_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            autor_email TEXT,
+            autor_nombre TEXT,
+            categoria TEXT,
+            titulo TEXT,
+            contenido TEXT,
+            likes INTEGER DEFAULT 0,
+            fecha TEXT
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS comunidad_comentarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER,
+            autor_nombre TEXT,
+            comentario TEXT,
+            fecha TEXT
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS comunidad_votos (
+            email TEXT,
+            opcion TEXT,
+            PRIMARY KEY (email, opcion)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -403,6 +478,94 @@ def es_admin(email: str) -> bool:
     conn.close()
     return bool(row and row[0])
 
+def obtener_nombre_comunidad(email: str) -> str:
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("SELECT apodo FROM usuarios WHERE email = ?", (email,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0] and row[0].strip():
+        return row[0].strip()
+    return email.split("@")[0]
+
+def guardar_apodo_comunidad(email: str, apodo: str):
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("UPDATE usuarios SET apodo = ? WHERE email = ?", (apodo.strip(), email))
+    conn.commit()
+    conn.close()
+
+def crear_post_comunidad(email: str, autor_nombre: str, categoria: str, titulo: str, contenido: str):
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO comunidad_posts (autor_email, autor_nombre, categoria, titulo, contenido, likes, fecha) VALUES (?, ?, ?, ?, ?, 0, ?)",
+        (email, autor_nombre, categoria, titulo.strip(), contenido.strip(), datetime.now().strftime("%d/%m %H:%M"))
+    )
+    conn.commit()
+    conn.close()
+
+def dar_like_post(post_id: int):
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("UPDATE comunidad_posts SET likes = likes + 1 WHERE id = ?", (post_id,))
+    conn.commit()
+    conn.close()
+
+def agregar_comentario_comunidad(post_id: int, autor_nombre: str, comentario: str):
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO comunidad_comentarios (post_id, autor_nombre, comentario, fecha) VALUES (?, ?, ?, ?)",
+        (post_id, autor_nombre, comentario.strip(), datetime.now().strftime("%d/%m %H:%M"))
+    )
+    conn.commit()
+    conn.close()
+
+def votar_encuesta(email: str, opcion: str):
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM comunidad_votos WHERE email = ? AND opcion = ?", (email, opcion))
+    ya_voto = c.fetchone() is not None
+    if ya_voto:
+        c.execute("DELETE FROM comunidad_votos WHERE email = ? AND opcion = ?", (email, opcion))
+    else:
+        c.execute("INSERT INTO comunidad_votos (email, opcion) VALUES (?, ?)", (email, opcion))
+    conn.commit()
+    conn.close()
+
+def obtener_datos_comunidad():
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM usuarios")
+    total_miembros = c.fetchone()[0]
+
+    c.execute("SELECT email, apodo FROM usuarios")
+    miembros_rows = c.fetchall()
+
+    c.execute("SELECT id, autor_email, autor_nombre, categoria, titulo, contenido, likes, fecha FROM comunidad_posts ORDER BY id DESC")
+    posts = c.fetchall()
+
+    c.execute("SELECT id, post_id, autor_nombre, comentario, fecha FROM comunidad_comentarios ORDER BY id ASC")
+    comentarios_rows = c.fetchall()
+
+    c.execute("SELECT opcion, COUNT(*) FROM comunidad_votos GROUP BY opcion")
+    votos_rows = dict(c.fetchall())
+    conn.close()
+
+    comentarios_por_post = {}
+    for cid, pid, anombre, ctxt, cfecha in comentarios_rows:
+        comentarios_por_post.setdefault(pid, []).append((cid, anombre, ctxt, cfecha))
+
+    return {
+        "total_miembros": total_miembros,
+        "miembros_rows": miembros_rows,
+        "posts": posts,
+        "comentarios_por_post": comentarios_por_post,
+        "total_comentarios": len(comentarios_rows),
+        "votos": votos_rows
+    }
+
 def usuario_existe(email: str) -> bool:
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
@@ -419,9 +582,10 @@ def registrar_usuario(email: str, password: str) -> bool:
         activo = 1 if admin_flag else 0
         tipo = "SUPER_PRO" if admin_flag else "FREE"
         expira = "ILIMITADO" if admin_flag else None
+        apodo_ini = email.split("@")[0]
         c.execute(
-            "INSERT INTO usuarios (email, password, plan_activo, plan_tipo, plan_expira, es_admin) VALUES (?, ?, ?, ?, ?, ?)",
-            (email, encriptar_password(password), activo, tipo, expira, admin_flag)
+            "INSERT INTO usuarios (email, password, plan_activo, plan_tipo, plan_expira, es_admin, apodo) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (email, encriptar_password(password), activo, tipo, expira, admin_flag, apodo_ini)
         )
         conn.commit()
         return True
@@ -721,7 +885,7 @@ def obtener_instruccion_skill() -> str:
     return SKILLS_DISPONIBLES.get(skill_sel, "")
 
 # ==============================================================================
-# MOTORES IA: GEMINI + GROQ + DEEPSEEK (BETA) + OPENAI
+# MOTORES IA: DETECCIÓN DINÁMICA DE MODELOS GROQ + DEEPSEEK BETA + ANTI-413
 # ==============================================================================
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
@@ -982,7 +1146,6 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
             try:
                 prompt_final = prompt_con_skill
                 if audio_path:
-                    # Si tiene clave de Groq u OpenAI transcribe con Whisper; si no, lee audio/texto disponible
                     trans_key = user_config.get("groq_key", "").strip() or user_config.get("openai_key", "").strip()
                     trans_prov = "groq" if user_config.get("groq_key", "").strip() else "openai"
                     if trans_key:
@@ -1369,7 +1532,7 @@ def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
     return True
 
 # --- BARRA DE NAVEGACIÓN SUPERIOR SIEMPRE VISIBLE ---
-opciones_menu = ["💬 Inicio (Chat IA)", "✂️ Editor y Redes", "📈 Tendencias TikTok", "📁 Mis Proyectos"]
+opciones_menu = ["💬 Inicio (Chat IA)", "✂️ Editor y Redes", "📈 Tendencias TikTok", "👥 Comunidad", "📁 Mis Proyectos"]
 
 if not es_super_pro and not usuario_es_admin:
     opciones_menu.append("💎 Planes / Key")
@@ -1710,7 +1873,7 @@ if pagina == "💬 Inicio (Chat IA)":
                             )
 
 # ==============================================================================
-# PÁGINA 2: EDITOR DE VIDEO + TÍTULOS IA + TIKTOK & YOUTUBE (PRO Y SUPER PRO)
+# PÁGINA 2: EDITOR DE VIDEO (VISTA PREVIA EN VIVO) + TÍTULOS IA + REDES
 # ==============================================================================
 elif pagina == "✂️ Editor y Redes":
     st.markdown("""
@@ -1776,32 +1939,42 @@ elif pagina == "✂️ Editor y Redes":
         with st.container(border=True):
             st.markdown('<span class="step-pill">EDITOR DE VIDEO</span>', unsafe_allow_html=True)
             col_prev, col_edit = st.columns([1, 1.4])
-            with col_prev:
-                st.markdown("#### 📺 Vista previa")
-                video_a_mostrar = st.session_state.get("video_editado_actual", video_elegido)
-                if not os.path.exists(video_a_mostrar):
-                    video_a_mostrar = video_elegido
-                st.video(video_a_mostrar)
 
             with col_edit:
                 st.markdown("#### 🎛️ Ajustes antes de subir")
                 r1, r2 = st.columns(2)
-                ed_ini = r1.number_input("Recortar inicio (seg)", min_value=0.0, max_value=dur_total, value=0.0, step=0.5)
-                ed_fin = r2.number_input("Recortar fin (seg)", min_value=0.5, max_value=dur_total, value=dur_total, step=0.5)
+                ed_ini = r1.number_input("Recortar inicio (seg)", min_value=0.0, max_value=dur_total, value=0.0, step=0.5, key="ed_ini_val")
+                ed_fin = r2.number_input("Recortar fin (seg)", min_value=0.5, max_value=dur_total, value=dur_total, step=0.5, key="ed_fin_val")
 
                 e1, e2, e3 = st.columns(3)
-                velocidad = e1.select_slider("Velocidad", options=[0.75, 1.0, 1.25, 1.5, 2.0], value=1.0)
-                volumen = e2.slider("Volumen", 0.0, 2.0, 1.0, 0.1)
-                contraste = e3.slider("Contraste", 0.5, 1.8, 1.0, 0.05)
+                velocidad = e1.select_slider("Velocidad", options=[0.75, 1.0, 1.25, 1.5, 2.0], value=1.0, key="ed_vel_val")
+                volumen = e2.slider("Volumen", 0.0, 2.0, 1.0, 0.1, key="ed_vol_val")
+                contraste = e3.slider("Contraste", 0.5, 1.8, 1.0, 0.05, key="ed_con_val")
 
-                brillo = st.slider("Brillo", -0.3, 0.3, 0.0, 0.02)
+                brillo = st.slider("Brillo", -0.3, 0.3, 0.0, 0.02, key="ed_bri_val")
                 texto_hook = st.text_input(
                     "🎯 Texto Gancho (Hook) arriba del video:",
                     value=st.session_state.get("hook_auto", ""),
-                    placeholder="Presiona el botón de IA arriba o escribe tu propio gancho..."
+                    placeholder="Presiona el botón de IA arriba o escribe tu propio gancho...",
+                    key="ed_hook_val"
                 )
 
-                if st.button("✂️ Aplicar edición y quemar Gancho en el video", type="primary", use_container_width=True):
+                btn_rapido, btn_full = st.columns(2)
+                if btn_rapido.button("⚡ Probar muestra (5s)", use_container_width=True):
+                    try:
+                        muestra_path = str(EDITED_DIR / f"muestra_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
+                        fin_muestra = min(ed_fin, ed_ini + 5.0)
+                        with st.spinner("Generando muestra rápida de 5s..."):
+                            editar_video_ffmpeg(
+                                video_elegido, muestra_path, ed_ini, fin_muestra,
+                                velocidad, volumen, brillo, contraste, texto_hook
+                            )
+                        st.session_state["video_editado_actual"] = muestra_path
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+                if btn_full.button("✂️ Aplicar edición y quemar Gancho", type="primary", use_container_width=True):
                     try:
                         nombre_editado = str(EDITED_DIR / f"editado_{datetime.now().strftime('%H%M%S')}_{Path(video_elegido).name}")
                         with st.spinner("Aplicando edición en Full HD..."):
@@ -1810,10 +1983,49 @@ elif pagina == "✂️ Editor y Redes":
                                 velocidad, volumen, brillo, contraste, texto_hook
                             )
                         st.session_state["video_editado_actual"] = nombre_editado
-                        st.success("¡Video editado con éxito!")
+                        st.success("¡Video editado con éxito! Ya se actualiza en la vista previa.")
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
+
+            with col_prev:
+                st.markdown("#### 📺 Vista previa")
+                video_a_mostrar = st.session_state.get("video_editado_actual", video_elegido)
+                if not os.path.exists(video_a_mostrar):
+                    video_a_mostrar = video_elegido
+
+                css_brillo = 1.0 + (brillo * 1.8)
+                filtro_css = f"brightness({css_brillo:.2f}) contrast({contraste:.2f})"
+                hook_html = ""
+                if texto_hook.strip():
+                    hook_html = f"""
+                    <div style="
+                        position:absolute; top:14%; left:50%; transform:translateX(-50%);
+                        z-index:10; background:rgba(0,0,0,0.78); color:#facc15;
+                        padding:8px 16px; border-radius:10px; font-weight:800;
+                        font-size:1.05rem; text-align:center; max-width:90%;
+                        box-shadow:0 4px 16px rgba(0,0,0,0.6); pointer-events:none;
+                    ">{texto_hook.strip()}</div>
+                    """
+
+                st.markdown(f"""
+                <style>
+                    .live-video-wrap video {{
+                        filter: {filtro_css} !important;
+                        transition: filter 0.15s ease;
+                    }}
+                </style>
+                <div class="live-video-wrap" style="position:relative;">
+                    {hook_html}
+                """, unsafe_allow_html=True)
+
+                if video_a_mostrar == video_elegido and (ed_ini > 0 or ed_fin < dur_total):
+                    st.video(video_a_mostrar, start_time=int(ed_ini), end_time=int(ed_fin))
+                else:
+                    st.video(video_a_mostrar)
+
+                st.markdown("</div>", unsafe_allow_html=True)
+                st.caption(f"Rango: {ed_ini:.1f}s – {ed_fin:.1f}s · Vel: {velocidad}x · Vol: {volumen:.1f}x")
 
         with st.container(border=True):
             st.markdown('<span class="step-pill">PUBLICAR EN TIKTOK Y YOUTUBE</span>', unsafe_allow_html=True)
@@ -1957,6 +2169,159 @@ elif pagina == "📈 Tendencias TikTok":
                         st.session_state["prompt_chat"] = f.get("prompt_molde", "")
                         st.session_state["pagina_actual"] = "💬 Inicio (Chat IA)"
                         st.rerun()
+
+# ==============================================================================
+# PÁGINA 3B: COMUNIDAD (OPINIONES, COMENTARIOS, ESTADÍSTICAS Y VOTACIÓN)
+# ==============================================================================
+elif pagina == "👥 Comunidad":
+    st.markdown("""
+    <div class="hero-box">
+        <div class="hero-title">Comunidad Clipper IA 👥</div>
+        <div class="hero-sub">Comparte tus opiniones, pide ideas, comenta los clips de otros creadores y vota qué sigue.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    datos_comm = obtener_datos_comunidad()
+    nombre_actual = obtener_nombre_comunidad(st.session_state["usuario"])
+
+    col_feed, col_stats = st.columns([2.2, 1])
+
+    with col_feed:
+        with st.container(border=True):
+            st.markdown("### ✍️ Nueva publicación o opinión")
+            c_cat, c_tit = st.columns([1, 2])
+            cat_post = c_cat.selectbox("Categoría", ["General", "Mejoras", "Lo que hice", "Dudas"])
+            tit_post = c_tit.text_input("Título corto", placeholder="Ej: Mi truco para ganchos en TikTok...")
+            txt_post = st.text_area("Comparte tu opinión, duda o experiencia:", placeholder="Escribe aquí lo que opinas o qué quieres compartir con la comunidad...", height=95)
+
+            if st.button("📢 Publicar en la Comunidad", type="primary", use_container_width=True):
+                if not txt_post.strip():
+                    st.warning("Escribe un mensaje antes de publicar.")
+                else:
+                    titulo_final_post = tit_post.strip() if tit_post.strip() else f"Opinión de {nombre_actual}"
+                    crear_post_comunidad(
+                        st.session_state["usuario"],
+                        nombre_actual,
+                        cat_post,
+                        titulo_final_post,
+                        txt_post
+                    )
+                    st.success("¡Publicado en la comunidad!")
+                    st.rerun()
+
+        st.write("")
+        filtro_cat = st.radio(
+            "Filtrar publicaciones:",
+            ["Todos", "General", "Mejoras", "Lo que hice", "Dudas"],
+            horizontal=True
+        )
+
+        posts_list = datos_comm["posts"]
+        if filtro_cat != "Todos":
+            posts_list = [p for p in posts_list if p[3] == filtro_cat]
+
+        if not posts_list:
+            st.info("Aún no hay publicaciones en esta categoría. ¡Sé el primero en opinar arriba!")
+        else:
+            for post_id, a_email, a_nombre, cat, tit, cont, likes_cnt, f_post in posts_list:
+                inicial = (a_nombre[:1] or "U").upper()
+                lista_coms = datos_comm["comentarios_por_post"].get(post_id, [])
+
+                with st.container(border=True):
+                    h_c1, h_c2 = st.columns([5, 1])
+                    with h_c1:
+                        st.markdown(f"""
+                        <div style="display:flex; align-items:center; gap:12px;">
+                            <div class="avatar-circle">{inicial}</div>
+                            <div>
+                                <div style="font-weight:700; color:#ffffff;">{a_nombre}</div>
+                                <div style="font-size:0.8rem; color:#94a3b8;">hace · {f_post} · <b>{cat}</b></div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with h_c2:
+                        st.caption(f"🏷️ {cat}")
+
+                    st.markdown(f"**{tit}**")
+                    st.write(cont)
+
+                    b_like, b_com_info = st.columns([1.2, 4])
+                    if b_like.button(f"👍 {likes_cnt}", key=f"like_post_{post_id}"):
+                        dar_like_post(post_id)
+                        st.rerun()
+                    b_com_info.caption(f"💬 {len(lista_coms)} comentarios")
+
+                    with st.expander(f"💬 Comentarios ({len(lista_coms)})", expanded=len(lista_coms) > 0):
+                        for _, c_autor, c_texto, c_fecha in lista_coms:
+                            st.markdown(f"**{c_autor}** _{c_fecha}_: {c_texto}")
+
+                        com_input = st.text_input(
+                            "Escribe un comentario...",
+                            key=f"com_in_{post_id}",
+                            placeholder="Comparte tu opinión o respuesta..."
+                        )
+                        if st.button("Enviar comentario", key=f"com_btn_{post_id}"):
+                            if com_input.strip():
+                                agregar_comentario_comunidad(post_id, nombre_actual, com_input)
+                                st.rerun()
+                            else:
+                                st.warning("Escribe un comentario primero.")
+
+    with col_stats:
+        with st.container(border=True):
+            inicial_yo = (nombre_actual[:1] or "U").upper()
+            st.markdown(f"""
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:0.5rem;">
+                <div class="avatar-circle">{inicial_yo}</div>
+                <div>
+                    <div style="font-weight:800; font-size:1.15rem;">Comunidad Clipper</div>
+                    <div style="font-size:0.8rem; color:#94a3b8;">Opiniones, ideas y clips de usuarios</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.caption("Comparte lo que creas, pregunta lo que no te sale y opina sobre las mejoras del Studio.")
+
+            st.divider()
+            st1, st2, st3 = st.columns(3)
+            st1.markdown(f'<div class="comm-stat-box"><div class="comm-stat-val">{datos_comm["total_miembros"]}</div><div class="comm-stat-lbl">Miembros</div></div>', unsafe_allow_html=True)
+            st2.markdown(f'<div class="comm-stat-box"><div class="comm-stat-val">{len(datos_comm["posts"])}</div><div class="comm-stat-lbl">Publicaciones</div></div>', unsafe_allow_html=True)
+            st3.markdown(f'<div class="comm-stat-box"><div class="comm-stat-val">{datos_comm["total_comentarios"]}</div><div class="comm-stat-lbl">Comentarios</div></div>', unsafe_allow_html=True)
+
+            st.write("")
+            avatars_html = ""
+            for m_email, m_apodo in datos_comm["miembros_rows"][:8]:
+                m_nom = (m_apodo or m_email.split("@")[0])[:1].upper()
+                avatars_html += f'<span class="mini-avatar">{m_nom}</span>'
+            if avatars_html:
+                st.markdown(f"<div style='margin-bottom:0.7rem;'>{avatars_html}</div>", unsafe_allow_html=True)
+
+            if st.button("👤 Tu perfil en la comunidad", use_container_width=True):
+                st.session_state["editar_perfil_comm"] = not st.session_state.get("editar_perfil_comm", False)
+
+            if st.session_state.get("editar_perfil_comm"):
+                nuevo_apodo = st.text_input("Tu nombre visible:", value=nombre_actual, key="input_apodo_comm")
+                if st.button("Guardar nombre", type="primary", use_container_width=True):
+                    if nuevo_apodo.strip():
+                        guardar_apodo_comunidad(st.session_state["usuario"], nuevo_apodo)
+                        st.session_state["editar_perfil_comm"] = False
+                        st.success("¡Nombre actualizado!")
+                        st.rerun()
+
+        st.write("")
+        with st.container(border=True):
+            st.markdown("#### 🗳️ Vota qué sigue")
+            st.caption("Un voto por opción. Puedes cambiarlo cuando quieras.")
+            opciones_voto = [
+                "Subtítulos animados palabra por palabra",
+                "Publicar directo en YouTube Shorts",
+                "Más plantillas de ganchos virales"
+            ]
+            votos_actuales = datos_comm["votos"]
+            for idx_v, op_v in enumerate(opciones_voto):
+                cant_v = votos_actuales.get(op_v, 0)
+                if st.button(f"{op_v}  —  **{cant_v}**", key=f"voto_btn_{idx_v}", use_container_width=True):
+                    votar_encuesta(st.session_state["usuario"], op_v)
+                    st.rerun()
 
 # ==============================================================================
 # PÁGINA 4: MIS PROYECTOS
