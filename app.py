@@ -30,6 +30,14 @@ st.markdown("""
         font-family: 'Plus Jakarta Sans', sans-serif !important;
     }
 
+    /* Ocultar botón Deploy, menú de tres puntos y barra superior */
+    #MainMenu {visibility: hidden !important;}
+    .stDeployButton {display: none !important;}
+    [data-testid="stToolbar"] {visibility: hidden !important;}
+    [data-testid="stDecoration"] {display: none !important;}
+    footer {visibility: hidden !important;}
+    header[data-testid="stHeader"] {background: transparent !important;}
+
     /* Fondo dinámico con malla de luces neón */
     .stApp {
         background:
