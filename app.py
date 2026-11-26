@@ -28,7 +28,7 @@ st.set_page_config(
 ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]
 YAPE_NUMERO = "+51 953 027 160"
 YAPE_WHATSAPP = "51953027160"
-VERSION_ACTUAL = "1.4.2"
+VERSION_ACTUAL = "1.4.4"
 URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
 MODELOS_GEMINI = ["gemini-3.8-flash"]
 
@@ -588,6 +588,8 @@ if "usuario" not in st.session_state:
     st.session_state["usuario"] = None
 if "pagina_actual" not in st.session_state:
     st.session_state["pagina_actual"] = "💬 Inicio (Chat IA)"
+if "transcripciones_cache" not in st.session_state:
+    st.session_state["transcripciones_cache"] = {}
 
 # ==============================================================================
 # PANTALLA DE LOGIN / REGISTRO CON GMAIL
@@ -694,11 +696,45 @@ user_config = cargar_json(USER_CONFIG_FILE, {})
 proyectos = cargar_json(PROJECTS_FILE, [])
 
 # ==============================================================================
-# MOTORES IA: GEMINI + RESPALDO AUTOMÁTICO GROQ (LLAMA 3) Y OPENAI (GPT-4O-MINI)
+# MOTORES IA: VELOCIDAD OPTIMIZADA (CACHÉ DE TRANSCRIPCIÓN + AUTO-MODELO GROQ)
 # ==============================================================================
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
+def obtener_modelo_groq_disponible(api_key: str) -> str:
+    """Consulta la cuenta de Groq una sola vez por sesión y guarda el modelo en caché."""
+    if st.session_state.get("groq_modelo_cache"):
+        return st.session_state["groq_modelo_cache"]
+
+    url = "https://api.groq.com/openai/v1/models"
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {api_key}", "User-Agent": BROWSER_UA},
+        method="GET"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        modelos = [m["id"] for m in data.get("data", []) if m.get("id")]
+        excluidos = ("whisper", "guard", "tts", "playai", "embed", "moderation", "orpheus", "safeguard")
+        chat_modelos = [m for m in modelos if not any(ex in m.lower() for ex in excluidos)]
+        for preferido in ("llama-3.1-8b-instant", "llama-3.3-70b", "llama-4", "qwen", "deepseek", "gemma"):
+            for m in chat_modelos:
+                if preferido in m.lower():
+                    st.session_state["groq_modelo_cache"] = m
+                    return m
+        if chat_modelos:
+            st.session_state["groq_modelo_cache"] = chat_modelos[0]
+            return chat_modelos[0]
+    except Exception:
+        pass
+    return "llama-3.1-8b-instant"
+
 def transcribir_audio_whisper_api(audio_path: str, proveedor: str, api_key: str) -> str:
+    """Transcribe audio con Whisper y guarda en caché para que búsquedas repetidas sean instantáneas."""
+    cache = st.session_state["transcripciones_cache"]
+    if audio_path in cache:
+        return cache[audio_path]
+
     if proveedor == "groq":
         url = "https://api.groq.com/openai/v1/audio/transcriptions"
         modelo = "whisper-large-v3-turbo"
@@ -746,14 +782,17 @@ def transcribir_audio_whisper_api(audio_path: str, proveedor: str, api_key: str)
 
     segmentos = data.get("segments", [])
     if segmentos:
-        lineas = [f"[{s['start']:.1f}s - {s['end']:.1f}s] {s['text'].strip()}" for s in segmentos]
-        return "\n".join(lineas)
-    return data.get("text", "")
+        resultado = "\n".join([f"[{s['start']:.1f}s - {s['end']:.1f}s] {s['text'].strip()}" for s in segmentos])
+    else:
+        resultado = data.get("text", "")
 
-def llamar_chat_openai_compatible(proveedor: str, api_key: str, prompt: str, esperar_json: bool = False) -> str:
+    cache[audio_path] = resultado
+    return resultado
+
+def llamar_chat_openai_compatible(proveedor: str, api_key: str, prompt: str, esperar_json: bool = False):
     if proveedor == "groq":
         url = "https://api.groq.com/openai/v1/chat/completions"
-        modelo = "llama-3.3-70b-versatile"
+        modelo = obtener_modelo_groq_disponible(api_key)
     else:
         url = "https://api.openai.com/v1/chat/completions"
         modelo = "gpt-4o-mini"
@@ -777,22 +816,24 @@ def llamar_chat_openai_compatible(proveedor: str, api_key: str, prompt: str, esp
         method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detalle = e.read().decode("utf-8", errors="ignore")
         raise Exception(f"HTTP {e.code}: {detalle}")
-    return data["choices"][0]["message"]["content"]
+    return data["choices"][0]["message"]["content"], modelo
 
 def obtener_orden_motores():
-    preferencia = user_config.get("motor_ia", "Automático (Gemini → Groq → OpenAI)")
+    preferencia = user_config.get("motor_ia", "⚡ Ultra Rápido (Groq → Gemini → OpenAI)")
     if preferencia == "Solo Groq (Llama 3)":
         return ["groq"]
     if preferencia == "Solo OpenAI (GPT-4o-mini)":
         return ["openai"]
     if preferencia == "Solo Gemini":
         return ["gemini"]
-    return ["gemini", "groq", "openai"]
+    if preferencia == "Automático (Gemini → Groq → OpenAI)":
+        return ["gemini", "groq", "openai"]
+    return ["groq", "gemini", "openai"]
 
 def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: bool = False, usar_google_search: bool = False):
     motores = obtener_orden_motores()
@@ -804,6 +845,11 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
             if not g_key:
                 errores.append("Gemini: sin API Key")
                 continue
+            # Si Gemini ya dio 429 en esta sesión y hay otros motores, saltarlo al instante
+            if st.session_state.get("gemini_agotado") and len(motores) > 1:
+                errores.append("Gemini: cuota agotada (saltado para ahorrar tiempo)")
+                continue
+
             client = genai.Client(api_key=g_key)
             audio_file = None
             try:
@@ -811,7 +857,7 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                 if audio_path:
                     audio_file = client.files.upload(file=audio_path)
                     while audio_file.state.name == "PROCESSING":
-                        time.sleep(1.5)
+                        time.sleep(1.0)
                         audio_file = client.files.get(name=audio_file.name)
                     contents = [audio_file, prompt]
 
@@ -827,8 +873,11 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                         return resp.text, f"Gemini ({modelo})"
                     except Exception as e_mod:
                         errores.append(f"{modelo}: {e_mod}")
+                        if "429" in str(e_mod) or "RESOURCE_EXHAUSTED" in str(e_mod):
+                            st.session_state["gemini_agotado"] = True
+                            break
                         if "503" in str(e_mod) or "UNAVAILABLE" in str(e_mod):
-                            time.sleep(2)
+                            time.sleep(1.5)
                             continue
             except Exception as e_g:
                 errores.append(f"Gemini: {e_g}")
@@ -849,8 +898,8 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                 if audio_path:
                     transcripcion = transcribir_audio_whisper_api(audio_path, "groq", gr_key)
                     prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion}\n\nINSTRUCCIÓN:\n{prompt}"
-                texto = llamar_chat_openai_compatible("groq", gr_key, prompt_final, esperar_json=esperar_json)
-                return texto, "Groq (Llama 3.3)"
+                texto, modelo_usado = llamar_chat_openai_compatible("groq", gr_key, prompt_final, esperar_json=esperar_json)
+                return texto, f"Groq ({modelo_usado})"
             except Exception as e_gr:
                 errores.append(f"Groq: {e_gr}")
 
@@ -864,8 +913,8 @@ def ejecutar_ia_con_respaldo(prompt: str, audio_path: str = None, esperar_json: 
                 if audio_path:
                     transcripcion = transcribir_audio_whisper_api(audio_path, "openai", oa_key)
                     prompt_final = f"TRANSCRIPCIÓN CON TIEMPOS EXACTOS DEL AUDIO:\n{transcripcion}\n\nINSTRUCCIÓN:\n{prompt}"
-                texto = llamar_chat_openai_compatible("openai", oa_key, prompt_final, esperar_json=esperar_json)
-                return texto, "OpenAI (GPT-4o-mini)"
+                texto, modelo_usado = llamar_chat_openai_compatible("openai", oa_key, prompt_final, esperar_json=esperar_json)
+                return texto, f"OpenAI ({modelo_usado})"
             except Exception as e_oa:
                 errores.append(f"OpenAI: {e_oa}")
 
@@ -912,6 +961,7 @@ def descargar_video(url: str, proj_id: str) -> str:
     return str(output_path)
 
 def extraer_audio(video_path: str, proj_id: str, min_inicio: float = 0.0, min_fin: float = 0.0) -> str:
+    """Extrae audio ligero mono 16kHz 32kbps para subir y transcribir 3x más rápido."""
     audio_path = WORK_DIR / f"audio_{proj_id}.mp3"
     if audio_path.exists():
         audio_path.unlink()
@@ -921,7 +971,7 @@ def extraer_audio(video_path: str, proj_id: str, min_inicio: float = 0.0, min_fi
     cmd += ["-i", video_path]
     if min_fin > min_inicio:
         cmd += ["-t", str((min_fin - min_inicio) * 60)]
-    cmd += ["-vn", "-acodec", "libmp3lame", "-b:a", "64k", str(audio_path)]
+    cmd += ["-vn", "-ac", "1", "-ar", "16000", "-acodec", "libmp3lame", "-b:a", "32k", str(audio_path)]
 
     resultado = subprocess.run(cmd, capture_output=True, text=True)
     if resultado.returncode != 0:
@@ -1269,9 +1319,10 @@ with st.sidebar:
     st.divider()
     with st.expander("⚙️ Motor IA y API Keys", expanded=True):
         opciones_motor = [
+            "⚡ Ultra Rápido (Groq → Gemini → OpenAI)",
             "Automático (Gemini → Groq → OpenAI)",
-            "Solo Gemini",
             "Solo Groq (Llama 3)",
+            "Solo Gemini",
             "Solo OpenAI (GPT-4o-mini)"
         ]
         motor_actual = user_config.get("motor_ia", opciones_motor[0])
@@ -1279,8 +1330,8 @@ with st.sidebar:
             motor_actual = opciones_motor[0]
 
         motor_sel = st.selectbox("🧠 Motor IA:", opciones_motor, index=opciones_motor.index(motor_actual))
+        k_groq = st.text_input("Groq API Key (Más rápido y gratis):", value=user_config.get("groq_key", ""), type="password", placeholder="gsk_...")
         k_gemini = st.text_input("Gemini API Key:", value=user_config.get("api_key", ""), type="password", placeholder="AIza...")
-        k_groq = st.text_input("Groq API Key (Respaldo gratis):", value=user_config.get("groq_key", ""), type="password", placeholder="gsk_...")
         k_openai = st.text_input("OpenAI API Key (Opcional):", value=user_config.get("openai_key", ""), type="password", placeholder="sk-...")
 
         if st.button("💾 Guardar motores y claves", use_container_width=True):
@@ -1288,6 +1339,8 @@ with st.sidebar:
             user_config["api_key"] = k_gemini.strip()
             user_config["groq_key"] = k_groq.strip()
             user_config["openai_key"] = k_openai.strip()
+            st.session_state.pop("gemini_agotado", None)
+            st.session_state.pop("groq_modelo_cache", None)
             guardar_json(USER_CONFIG_FILE, user_config)
             st.success("¡Guardado!")
 
@@ -1367,7 +1420,7 @@ if pagina == "💬 Inicio (Chat IA)":
                         proj_id = datetime.now().strftime("%Y%m%d_%H%M%S")
                         with st.spinner("Descargando vídeo..."):
                             v_path = descargar_video(url_input, proj_id)
-                        with st.spinner("Extrayendo audio para la IA..."):
+                        with st.spinner("Extrayendo audio ligero para la IA..."):
                             a_path = extraer_audio(v_path, proj_id, min_ini, min_fin)
                         st.session_state["proj_id"] = proj_id
                         st.session_state["video_path"] = v_path
@@ -1387,7 +1440,7 @@ if pagina == "💬 Inicio (Chat IA)":
                     v_path = str(WORK_DIR / f"video_{proj_id}.mp4")
                     with open(v_path, "wb") as f:
                         f.write(archivo.read())
-                    with st.spinner("Extrayendo audio para la IA..."):
+                    with st.spinner("Extrayendo audio ligero para la IA..."):
                         a_path = extraer_audio(v_path, proj_id, min_ini, min_fin)
                     st.session_state["proj_id"] = proj_id
                     st.session_state["video_path"] = v_path
@@ -1430,7 +1483,8 @@ if pagina == "💬 Inicio (Chat IA)":
 
             if st.button("🚀 Buscar momentos con IA", type="primary", use_container_width=True):
                 try:
-                    with st.spinner("La IA está analizando tu vídeo y detectando los mejores clips…"):
+                    t0 = time.time()
+                    with st.spinner("⚡ Analizando vídeo y detectando los mejores clips…"):
                         clips, motor_usado = buscar_momentos_ia(
                             st.session_state["audio_path"],
                             instruccion,
@@ -1452,7 +1506,7 @@ if pagina == "💬 Inicio (Chat IA)":
                         proyectos.insert(0, nuevo_proj)
                         guardar_json(PROJECTS_FILE, proyectos)
 
-                    st.success(f"¡Listo! Encontré {len(clips)} momentos virales usando **{motor_usado}**.")
+                    st.success(f"¡Listo en {time.time() - t0:.1f}s! Encontré {len(clips)} momentos virales usando **{motor_usado}**.")
                 except Exception as e:
                     st.error(str(e))
 
@@ -1594,7 +1648,7 @@ elif pagina == "✂️ Editor y Redes":
 
             if st.button("✨ Analizar este clip con IA (Auto-Gancho + 5 Títulos)", type="primary", use_container_width=True):
                 try:
-                    with st.spinner("La IA está analizando tu clip para crear el Gancho visual y los Títulos..."):
+                    with st.spinner("⚡ Creando Gancho visual y Títulos..."):
                         res_ia, motor_usado = analizar_clip_para_redes_ia(video_elegido, tono_video, contexto_extra)
                         st.session_state["tiktok_ia"] = res_ia
                         st.session_state["hook_auto"] = res_ia.get("gancho_visual", "")
@@ -1706,7 +1760,7 @@ elif pagina == "📈 Tendencias TikTok":
             st.warning("🔒 **Función exclusiva del Plan SUPER PRO**")
             st.markdown("""
             Sube al **Plan Super Pro** para desbloquear:
-            - 🔎 **Buscador de Tendencias en Vivo (Gemini + Respaldo Groq/OpenAI):** qué temas, formatos y ganchos explotan HOY en tu nicho y país.
+            - 🔎 **Buscador de Tendencias en Vivo (Groq / Gemini / OpenAI):** qué temas, formatos y ganchos explotan HOY en tu nicho y país.
             - 🧬 **Clonador de Fórmula Viral:** pega el link de cualquier TikTok viral, extrae su gancho de 3 segundos, ritmo y CTA, y úsalo como molde en tus propios videos con un clic.
             - 🎞️ Hasta **10 clips** por video.
             """)
@@ -1734,10 +1788,11 @@ elif pagina == "📈 Tendencias TikTok":
 
             if st.button("📡 Escanear tendencias de hoy", type="primary", use_container_width=True):
                 try:
-                    with st.spinner(f"Buscando tendencias reales de {nicho} en {region}..."):
+                    t0 = time.time()
+                    with st.spinner(f"⚡ Escaneando tendencias de {nicho} en {region}..."):
                         resultado_trend, motor_usado = buscar_tendencias_tiktok_ia(nicho, region, extra_trend)
                         st.session_state["resultado_tendencias"] = resultado_trend
-                        st.session_state["motor_tendencias"] = motor_usado
+                        st.session_state["motor_tendencias"] = f"{motor_usado} · {time.time() - t0:.1f}s"
                 except Exception as e:
                     st.error(str(e))
 
@@ -1757,7 +1812,7 @@ elif pagina == "📈 Tendencias TikTok":
                     st.warning("Pega un enlace de TikTok primero.")
                 else:
                     try:
-                        with st.spinner("Descargando TikTok y aplicando ingeniería inversa con IA..."):
+                        with st.spinner("⚡ Descargando TikTok y extrayendo fórmula viral..."):
                             formula, motor_usado = clonar_formula_viral_ia(url_tk.strip())
                             st.session_state["formula_clonada"] = formula
                         st.success(f"¡Fórmula viral extraída con **{motor_usado}**!")
