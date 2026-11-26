@@ -6,10 +6,12 @@ import sys
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 import random
+import secrets
 import hashlib
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from google import genai
 from google.genai import types
@@ -20,6 +22,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# --- CONFIGURACIÓN DE ADMIN Y YAPE ---
+ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]  # Tu cuenta administradora
+YAPE_NUMERO = "+51 953 027 160"
+YAPE_WHATSAPP = "51953027160"
 
 # --- ESTILO VISUAL PREMIUM (NEXUS STUDIO VIBRANT DARK + NEON GLASS) ---
 st.markdown("""
@@ -213,11 +220,46 @@ st.markdown("""
         -webkit-text-fill-color: transparent;
         margin-bottom: 0.2rem;
     }
+
+    /* Estilos Paywall */
+    .benefit-item {
+        font-size: 1.02rem;
+        color: #e2e8f0;
+        margin: 0.55rem 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .price-box {
+        background: rgba(124, 58, 237, 0.14);
+        border: 1px solid rgba(168, 85, 247, 0.45);
+        border-radius: 16px;
+        padding: 1.2rem;
+        margin: 1rem 0;
+    }
+    .discount-pill {
+        display: inline-block;
+        background: rgba(16, 185, 129, 0.22);
+        color: #34d399;
+        border: 1px solid rgba(52, 211, 153, 0.45);
+        padding: 3px 10px;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        margin-left: 8px;
+    }
+    .yape-card {
+        background: linear-gradient(135deg, rgba(116, 34, 132, 0.35) 0%, rgba(16, 185, 129, 0.18) 100%);
+        border: 1px solid rgba(192, 132, 252, 0.45);
+        border-radius: 16px;
+        padding: 1.1rem;
+        text-align: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# SISTEMA DE CUENTAS Y VERIFICACIÓN POR GMAIL (API DE BREVO)
+# BASE DE DATOS: USUARIOS, PLANES Y KEYS DE LICENCIA
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect("usuarios.db")
@@ -225,7 +267,25 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             email TEXT PRIMARY KEY,
-            password TEXT
+            password TEXT,
+            plan_activo INTEGER DEFAULT 0,
+            plan_expira TEXT
+        )
+    """)
+    # Migración segura si la tabla ya existía sin columnas de plan
+    for col_def in ("plan_activo INTEGER DEFAULT 0", "plan_expira TEXT"):
+        try:
+            c.execute(f"ALTER TABLE usuarios ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS license_keys (
+            clave TEXT PRIMARY KEY,
+            dias INTEGER,
+            usada_por TEXT,
+            fecha_creacion TEXT,
+            fecha_uso TEXT
         )
     """)
     conn.commit()
@@ -233,6 +293,9 @@ def init_db():
 
 def encriptar_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
+
+def es_admin(email: str) -> bool:
+    return email.strip().lower() in [a.lower() for a in ADMIN_EMAILS]
 
 def usuario_existe(email: str) -> bool:
     conn = sqlite3.connect("usuarios.db")
@@ -246,9 +309,11 @@ def registrar_usuario(email: str, password: str) -> bool:
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
     try:
+        activo = 1 if es_admin(email) else 0
+        expira = "ILIMITADO" if es_admin(email) else None
         c.execute(
-            "INSERT INTO usuarios (email, password) VALUES (?, ?)",
-            (email, encriptar_password(password))
+            "INSERT INTO usuarios (email, password, plan_activo, plan_expira) VALUES (?, ?, ?, ?)",
+            (email, encriptar_password(password), activo, expira)
         )
         conn.commit()
         return True
@@ -267,6 +332,100 @@ def verificar_login(email: str, password: str) -> bool:
     valido = c.fetchone() is not None
     conn.close()
     return valido
+
+def obtener_estado_plan(email: str):
+    """Retorna (tiene_acceso: bool, texto_expiracion: str)"""
+    if es_admin(email):
+        return True, "ADMIN (Ilimitado)"
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("SELECT plan_activo, plan_expira FROM usuarios WHERE email = ?", (email,))
+    row = c.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return False, "Sin plan"
+    expira = row[1]
+    if expira == "ILIMITADO":
+        return True, "Ilimitado"
+    try:
+        fecha_exp = datetime.strptime(expira, "%Y-%m-%d")
+        if datetime.now() <= fecha_exp + timedelta(days=1):
+            return True, f"Hasta {expira}"
+        return False, f"Vencido ({expira})"
+    except Exception:
+        return False, "Sin plan"
+
+def generar_nueva_key(dias: int) -> str:
+    parte1 = secrets.token_hex(2).upper()
+    parte2 = secrets.token_hex(2).upper()
+    clave = f"CLIP-{parte1}-{parte2}"
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO license_keys (clave, dias, usada_por, fecha_creacion, fecha_uso) VALUES (?, ?, NULL, ?, NULL)",
+        (clave, dias, datetime.now().strftime("%Y-%m-%d %H:%M"))
+    )
+    conn.commit()
+    conn.close()
+    return clave
+
+def canjear_key(email: str, clave: str):
+    clave = clave.strip().upper()
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("SELECT dias, usada_por FROM license_keys WHERE clave = ?", (clave,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return False, "La key no existe. Verifica que esté bien escrita."
+    dias, usada_por = row
+    if usada_por is not None:
+        conn.close()
+        return False, "Esta key ya fue utilizada por otra cuenta."
+
+    if dias == 0:
+        expira = "ILIMITADO"
+    else:
+        expira = (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
+
+    c.execute(
+        "UPDATE license_keys SET usada_por = ?, fecha_uso = ? WHERE clave = ?",
+        (email, datetime.now().strftime("%Y-%m-%d %H:%M"), clave)
+    )
+    c.execute(
+        "UPDATE usuarios SET plan_activo = 1, plan_expira = ? WHERE email = ?",
+        (expira, email)
+    )
+    conn.commit()
+    conn.close()
+    return True, f"¡Plan activado con éxito! Vigencia: {expira}"
+
+def actualizar_acceso_manual(email: str, activar: bool, dias: int = 30):
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    if activar:
+        expira = "ILIMITADO" if dias == 0 else (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
+        c.execute("UPDATE usuarios SET plan_activo = 1, plan_expira = ? WHERE email = ?", (expira, email))
+    else:
+        c.execute("UPDATE usuarios SET plan_activo = 0, plan_expira = NULL WHERE email = ?", (email,))
+    conn.commit()
+    conn.close()
+
+def listar_keys():
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("SELECT clave, dias, usada_por, fecha_creacion, fecha_uso FROM license_keys ORDER BY fecha_creacion DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def listar_usuarios():
+    conn = sqlite3.connect("usuarios.db")
+    c = conn.cursor()
+    c.execute("SELECT email, plan_activo, plan_expira FROM usuarios ORDER BY email ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 def enviar_codigo_gmail(destinatario: str, codigo: str):
     if "EMAIL_REMITENTE" not in st.secrets or "BREVO_API_KEY" not in st.secrets:
@@ -313,6 +472,9 @@ if "autenticado" not in st.session_state:
 if "usuario" not in st.session_state:
     st.session_state["usuario"] = None
 
+# ==============================================================================
+# PANTALLA 1: LOGIN / REGISTRO CON GMAIL
+# ==============================================================================
 if not st.session_state["autenticado"]:
     _, col_centro, _ = st.columns([1, 1.6, 1])
     with col_centro:
@@ -378,9 +540,105 @@ if not st.session_state["autenticado"]:
     st.stop()
 
 # ==============================================================================
+# VERIFICACIÓN DE PLAN ACTIVO (PAYWALL "ÚLTIMO PASO" CON YAPE + KEY)
+# ==============================================================================
+tiene_plan, texto_plan = obtener_estado_plan(st.session_state["usuario"])
+
+if not tiene_plan:
+    with st.sidebar:
+        st.markdown('<div class="brand-logo">⚡ Mi Clipper IA</div>', unsafe_allow_html=True)
+        st.caption(f"👤 {st.session_state['usuario']}")
+        st.warning("🔒 Plan: Sin activar")
+        if st.button("🚪 Cerrar sesión", use_container_width=True):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
+
+    _, col_pay, _ = st.columns([0.5, 2.2, 0.5])
+    with col_pay:
+        with st.container(border=True):
+            st.markdown('<span class="step-pill">ÚLTIMO PASO</span>', unsafe_allow_html=True)
+            st.markdown('<div class="hero-title" style="text-align:left; font-size:2.2rem;">Consigue los clips de tu vídeo</div>', unsafe_allow_html=True)
+            st.write("")
+
+            st.markdown("""
+            <div class="benefit-item">✅ Los mejores momentos de todo tu vídeo, encontrados y ordenados</div>
+            <div class="benefit-item">✅ Descarga en HD sin marca de agua</div>
+            <div class="benefit-item">✅ Cambia cualquier clip: recórtalo, reencuádralo, cambia los subtítulos</div>
+            <div class="benefit-item">✅ Publica en TikTok y YouTube desde Mi Clipper IA Studio, con el texto escrito</div>
+            """, unsafe_allow_html=True)
+
+            st.write("")
+            es_anual = st.toggle("Descuento anual (61%)", value=True)
+
+            if es_anual:
+                st.markdown("""
+                <div class="price-box">
+                    <div style="font-size:1.05rem; font-weight:700; color:#e2e8f0;">Clips / Anual</div>
+                    <div style="margin-top:0.5rem;">
+                        <span style="text-decoration:line-through; color:#94a3b8; font-size:1.1rem;">$227.88</span>
+                        <span style="font-size:2rem; font-weight:800; color:#ffffff; margin-left:8px;">$7.50</span>
+                        <span style="color:#cbd5e1;">/mes</span>
+                        <span class="discount-pill">61% de descuento</span>
+                    </div>
+                    <div style="color:#94a3b8; font-size:0.88rem; margin-top:0.3rem;">Facturación anual · $89.99/año</div>
+                </div>
+                """, unsafe_allow_html=True)
+                plan_texto_wa = "Plan Anual ($89.99/año)"
+            else:
+                st.markdown("""
+                <div class="price-box">
+                    <div style="font-size:1.05rem; font-weight:700; color:#e2e8f0;">Clips / Mensual</div>
+                    <div style="margin-top:0.5rem;">
+                        <span style="font-size:2rem; font-weight:800; color:#ffffff;">$19.00</span>
+                        <span style="color:#cbd5e1;">/mes</span>
+                    </div>
+                    <div style="color:#94a3b8; font-size:0.88rem; margin-top:0.3rem;">Facturación mensual · Cancela cuando quieras</div>
+                </div>
+                """, unsafe_allow_html=True)
+                plan_texto_wa = "Plan Mensual ($19.00/mes)"
+
+            col_yape, col_key = st.columns(2)
+
+            with col_yape:
+                st.markdown(f"""
+                <div class="yape-card">
+                    <div style="font-size:0.85rem; color:#e9d5ff; font-weight:700;">PAGA CON YAPE</div>
+                    <div style="font-size:1.55rem; font-weight:800; color:#ffffff; margin:0.4rem 0;">{YAPE_NUMERO}</div>
+                    <div style="font-size:0.85rem; color:#cbd5e1;">Realiza tu Yape y envíanos la captura por WhatsApp para entregarte tu Key de acceso al instante.</div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.write("")
+                msg_wa = urllib.parse.quote(
+                    f"Hola! Acabo de yapear para activar mi {plan_texto_wa} en Mi Clipper IA Studio. Mi correo registrado es: {st.session_state['usuario']}"
+                )
+                st.link_button(
+                    "📲 Enviar captura de Yape por WhatsApp",
+                    f"https://wa.me/{YAPE_WHATSAPP}?text={msg_wa}",
+                    use_container_width=True
+                )
+
+            with col_key:
+                st.markdown("#### 🔑 ¿Ya tienes tu Key?")
+                st.caption("Ingresa la clave que te enviamos tras tu pago por Yape para desbloquear tu cuenta:")
+                key_input = st.text_input("Key de activación", placeholder="Ej: CLIP-A1B2-C3D4").strip().upper()
+                if st.button("🚀 Activar mi Plan", type="primary", use_container_width=True):
+                    if not key_input:
+                        st.warning("Escribe tu key primero.")
+                    else:
+                        ok, msg = canjear_key(st.session_state["usuario"], key_input)
+                        if ok:
+                            st.success(msg)
+                            time.sleep(1.2)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+    st.stop()
+
+# ==============================================================================
 # SISTEMA DE ACTUALIZACIONES AUTOMÁTICAS
 # ==============================================================================
-VERSION_ACTUAL = "1.2.0"
+VERSION_ACTUAL = "1.3.0"
 URL_VERSION_JSON = "https://raw.githubusercontent.com/andres261727/CLIPS-/main/version.json"
 
 def revisar_actualizacion():
@@ -794,15 +1052,20 @@ with st.sidebar:
     st.markdown('<div class="brand-logo">⚡ Mi Clipper IA</div>', unsafe_allow_html=True)
     st.caption(f"Studio Pro · v{VERSION_ACTUAL}")
     st.caption(f"👤 {st.session_state['usuario']}")
+    st.caption(f"💎 Plan: {texto_plan}")
     if st.button("🚪 Cerrar sesión", use_container_width=True):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
     st.divider()
 
+    opciones_menu = ["💬 Inicio (Chat IA)", "✂️ Editor y TikTok", "📁 Mis Proyectos", "⚙️ Ajustes y API Key"]
+    if es_admin(st.session_state["usuario"]):
+        opciones_menu.append("👑 Panel Admin")
+
     pagina = st.radio(
         "Navegación",
-        ["💬 Inicio (Chat IA)", "✂️ Editor y TikTok", "📁 Mis Proyectos", "⚙️ Ajustes y API Key"],
+        opciones_menu,
         label_visibility="collapsed"
     )
 
@@ -1243,3 +1506,73 @@ elif pagina == "⚙️ Ajustes y API Key":
                 except Exception:
                     pass
             st.success("Carpeta temporal limpiada.")
+
+# ==============================================================================
+# PÁGINA 5: PANEL ADMIN (GENERAR KEYS Y GESTIONAR USUARIOS)
+# ==============================================================================
+elif pagina == "👑 Panel Admin" and es_admin(st.session_state["usuario"]):
+    st.markdown("""
+    <div class="hero-box">
+        <div class="hero-title">Panel de Administrador 👑</div>
+        <div class="hero-sub">Genera keys de activación para tus clientes de Yape y administra sus accesos.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tab_keys, tab_users = st.tabs(["🔑 Generar y ver Keys", "👥 Usuarios registrados"])
+
+    with tab_keys:
+        with st.container(border=True):
+            st.markdown("#### ✨ Generar nueva Key de licencia")
+            col_d, col_b = st.columns([2, 1])
+            opciones_duracion = {
+                "Plan Mensual (30 días)": 30,
+                "Plan Trimestral (90 días)": 90,
+                "Plan Anual (365 días)": 365,
+                "Acceso Ilimitado (De por vida)": 0
+            }
+            seleccion = col_d.selectbox("Duración del plan:", list(opciones_duracion.keys()))
+            with col_b:
+                st.write("")
+                st.write("")
+                if st.button("⚡ Generar Key", type="primary", use_container_width=True):
+                    nueva_clave = generar_nueva_key(opciones_duracion[seleccion])
+                    st.session_state["ultima_key_generada"] = nueva_clave
+
+            if "ultima_key_generada" in st.session_state:
+                st.success("¡Key generada! Cópiala y envíasela al cliente por WhatsApp:")
+                st.code(st.session_state["ultima_key_generada"], language="text")
+
+        with st.container(border=True):
+            st.markdown("#### 📋 Historial de Keys")
+            keys = listar_keys()
+            if not keys:
+                st.info("Aún no has generado ninguna key.")
+            else:
+                for clave, dias, usada_por, f_crea, f_uso in keys:
+                    dur_txt = "Ilimitado" if dias == 0 else f"{dias} días"
+                    if usada_por:
+                        st.markdown(f"🔴 **`{clave}`** · `{dur_txt}` · Usada por **{usada_por}** ({f_uso})")
+                    else:
+                        st.markdown(f"🟢 **`{clave}`** · `{dur_txt}` · **Disponible** _(creada {f_crea})_")
+
+    with tab_users:
+        with st.container(border=True):
+            st.markdown("#### 👥 Gestión manual de usuarios")
+            usuarios = listar_usuarios()
+            if not usuarios:
+                st.info("No hay usuarios registrados todavía.")
+            else:
+                for email_u, activo_u, expira_u in usuarios:
+                    c1, c2, c3, c4 = st.columns([2.5, 1.5, 1, 1])
+                    estado = f"🟢 Activo ({expira_u})" if activo_u else "🔴 Sin plan"
+                    if es_admin(email_u):
+                        estado = "👑 ADMIN"
+                    c1.markdown(f"**{email_u}**")
+                    c2.markdown(estado)
+                    if not es_admin(email_u):
+                        if c3.button("✅ +30 días", key=f"act_{email_u}", use_container_width=True):
+                            actualizar_acceso_manual(email_u, True, 30)
+                            st.rerun()
+                        if c4.button("🚫 Quitar", key=f"rev_{email_u}", use_container_width=True):
+                            actualizar_acceso_manual(email_u, False)
+                            st.rerun()
