@@ -27,7 +27,6 @@ st.set_page_config(
 ADMIN_EMAILS = ["gomezhermozaa@gmail.com"]
 YAPE_NUMERO = "+51 953 027 160"
 YAPE_WHATSAPP = "51953027160"
-GLOBAL_CONFIG_FILE = Path("global_config.json")
 
 # --- ESTILO VISUAL PREMIUM (NEXUS STUDIO VIBRANT DARK + NEON GLASS) ---
 st.markdown("""
@@ -228,18 +227,25 @@ st.markdown("""
         margin-bottom: 0.2rem;
     }
 
-    /* Estilos Paywall */
+    /* Estilos Planes */
     .benefit-item {
-        font-size: 1.02rem;
+        font-size: 0.95rem;
         color: #e2e8f0;
-        margin: 0.55rem 0;
+        margin: 0.45rem 0;
     }
     .price-box {
         background: rgba(124, 58, 237, 0.14);
         border: 1px solid rgba(168, 85, 247, 0.45);
         border-radius: 16px;
-        padding: 1.2rem;
-        margin: 1rem 0;
+        padding: 1.1rem;
+        margin: 0.8rem 0;
+    }
+    .super-box {
+        background: linear-gradient(135deg, rgba(124, 58, 237, 0.25) 0%, rgba(236, 72, 153, 0.2) 100%);
+        border: 2px solid #ec4899;
+        border-radius: 16px;
+        padding: 1.1rem;
+        margin: 0.8rem 0;
     }
     .discount-pill {
         display: inline-block;
@@ -248,9 +254,9 @@ st.markdown("""
         border: 1px solid rgba(52, 211, 153, 0.45);
         padding: 3px 10px;
         border-radius: 999px;
-        font-size: 0.8rem;
+        font-size: 0.78rem;
         font-weight: 700;
-        margin-left: 8px;
+        margin-left: 6px;
     }
     .yape-card {
         background: linear-gradient(135deg, rgba(116, 34, 132, 0.35) 0%, rgba(16, 185, 129, 0.18) 100%);
@@ -263,7 +269,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# BASE DE DATOS: USUARIOS, PLANES, ROLES ADMIN Y KEYS
+# BASE DE DATOS: USUARIOS, PLANES (FREE / PRO / SUPER_PRO), ROLES ADMIN Y KEYS
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect("usuarios.db")
@@ -273,11 +279,17 @@ def init_db():
             email TEXT PRIMARY KEY,
             password TEXT,
             plan_activo INTEGER DEFAULT 0,
+            plan_tipo TEXT DEFAULT 'FREE',
             plan_expira TEXT,
             es_admin INTEGER DEFAULT 0
         )
     """)
-    for col_def in ("plan_activo INTEGER DEFAULT 0", "plan_expira TEXT", "es_admin INTEGER DEFAULT 0"):
+    for col_def in (
+        "plan_activo INTEGER DEFAULT 0",
+        "plan_tipo TEXT DEFAULT 'FREE'",
+        "plan_expira TEXT",
+        "es_admin INTEGER DEFAULT 0"
+    ):
         try:
             c.execute(f"ALTER TABLE usuarios ADD COLUMN {col_def}")
         except sqlite3.OperationalError:
@@ -287,16 +299,18 @@ def init_db():
         CREATE TABLE IF NOT EXISTS license_keys (
             clave TEXT PRIMARY KEY,
             dias INTEGER,
+            plan_tipo TEXT DEFAULT 'PRO',
             da_admin INTEGER DEFAULT 0,
             usada_por TEXT,
             fecha_creacion TEXT,
             fecha_uso TEXT
         )
     """)
-    try:
-        c.execute("ALTER TABLE license_keys ADD COLUMN da_admin INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
+    for col_def in ("plan_tipo TEXT DEFAULT 'PRO'", "da_admin INTEGER DEFAULT 0"):
+        try:
+            c.execute(f"ALTER TABLE license_keys ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass
 
     conn.commit()
     conn.close()
@@ -331,10 +345,11 @@ def registrar_usuario(email: str, password: str) -> bool:
     try:
         admin_flag = 1 if es_admin_super(email) else 0
         activo = 1 if admin_flag else 0
+        tipo = "SUPER_PRO" if admin_flag else "FREE"
         expira = "ILIMITADO" if admin_flag else None
         c.execute(
-            "INSERT INTO usuarios (email, password, plan_activo, plan_expira, es_admin) VALUES (?, ?, ?, ?, ?)",
-            (email, encriptar_password(password), activo, expira, admin_flag)
+            "INSERT INTO usuarios (email, password, plan_activo, plan_tipo, plan_expira, es_admin) VALUES (?, ?, ?, ?, ?, ?)",
+            (email, encriptar_password(password), activo, tipo, expira, admin_flag)
         )
         conn.commit()
         return True
@@ -355,35 +370,41 @@ def verificar_login(email: str, password: str) -> bool:
     return valido
 
 def obtener_estado_plan(email: str):
+    """Retorna (nivel: 'FREE'|'PRO'|'SUPER_PRO', texto_legible: str)"""
     if es_admin(email):
-        return True, "ADMIN PRO (Ilimitado)"
+        return "SUPER_PRO", "ADMIN SUPER PRO"
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
-    c.execute("SELECT plan_activo, plan_expira FROM usuarios WHERE email = ?", (email,))
+    c.execute("SELECT plan_activo, plan_tipo, plan_expira FROM usuarios WHERE email = ?", (email,))
     row = c.fetchone()
     conn.close()
     if not row or not row[0]:
-        return False, "Plan Free"
-    expira = row[1]
+        return "FREE", "Plan Free"
+
+    tipo = row[1] if row[1] in ("PRO", "SUPER_PRO") else "PRO"
+    expira = row[2]
+    etiqueta = "Super Pro" if tipo == "SUPER_PRO" else "Plan Pro"
+
     if expira == "ILIMITADO":
-        return True, "Plan Pro (Ilimitado)"
+        return tipo, f"{etiqueta} (Ilimitado)"
     try:
         fecha_exp = datetime.strptime(expira, "%Y-%m-%d")
         if datetime.now() <= fecha_exp + timedelta(days=1):
-            return True, f"Plan Pro (hasta {expira})"
-        return False, f"Plan Free (venció {expira})"
+            return tipo, f"{etiqueta} (hasta {expira})"
+        return "FREE", f"Plan Free (venció {expira})"
     except Exception:
-        return False, "Plan Free"
+        return "FREE", "Plan Free"
 
-def generar_nueva_key(dias: int, da_admin: bool = False) -> str:
+def generar_nueva_key(dias: int, plan_tipo: str = "PRO", da_admin: bool = False) -> str:
+    prefijo = "SPRO" if plan_tipo == "SUPER_PRO" else "PRO"
     parte1 = secrets.token_hex(2).upper()
     parte2 = secrets.token_hex(2).upper()
-    clave = f"CLIP-{parte1}-{parte2}"
+    clave = f"{prefijo}-{parte1}-{parte2}"
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
     c.execute(
-        "INSERT INTO license_keys (clave, dias, da_admin, usada_por, fecha_creacion, fecha_uso) VALUES (?, ?, ?, NULL, ?, NULL)",
-        (clave, dias, 1 if da_admin else 0, datetime.now().strftime("%Y-%m-%d %H:%M"))
+        "INSERT INTO license_keys (clave, dias, plan_tipo, da_admin, usada_por, fecha_creacion, fecha_uso) VALUES (?, ?, ?, ?, NULL, ?, NULL)",
+        (clave, dias, plan_tipo, 1 if da_admin else 0, datetime.now().strftime("%Y-%m-%d %H:%M"))
     )
     conn.commit()
     conn.close()
@@ -393,16 +414,17 @@ def canjear_key(email: str, clave: str):
     clave = clave.strip().upper()
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
-    c.execute("SELECT dias, da_admin, usada_por FROM license_keys WHERE clave = ?", (clave,))
+    c.execute("SELECT dias, plan_tipo, da_admin, usada_por FROM license_keys WHERE clave = ?", (clave,))
     row = c.fetchone()
     if not row:
         conn.close()
         return False, "La key no existe. Verifica que esté bien escrita."
-    dias, da_admin, usada_por = row
+    dias, plan_tipo, da_admin, usada_por = row
     if usada_por is not None:
         conn.close()
         return False, "Esta key ya fue utilizada por otra cuenta."
 
+    plan_tipo = plan_tipo if plan_tipo in ("PRO", "SUPER_PRO") else "PRO"
     expira = "ILIMITADO" if dias == 0 else (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
 
     c.execute(
@@ -411,27 +433,28 @@ def canjear_key(email: str, clave: str):
     )
     if da_admin:
         c.execute(
-            "UPDATE usuarios SET plan_activo = 1, plan_expira = ?, es_admin = 1 WHERE email = ?",
-            (expira, email)
+            "UPDATE usuarios SET plan_activo = 1, plan_tipo = ?, plan_expira = ?, es_admin = 1 WHERE email = ?",
+            (plan_tipo, expira, email)
         )
     else:
         c.execute(
-            "UPDATE usuarios SET plan_activo = 1, plan_expira = ? WHERE email = ?",
-            (expira, email)
+            "UPDATE usuarios SET plan_activo = 1, plan_tipo = ?, plan_expira = ? WHERE email = ?",
+            (plan_tipo, expira, email)
         )
     conn.commit()
     conn.close()
-    extra_admin = " + Acceso Admin" if da_admin else ""
-    return True, f"¡Plan Pro activado{extra_admin}! Vigencia: {expira}"
+    nombre_plan = "Plan Super Pro" if plan_tipo == "SUPER_PRO" else "Plan Pro"
+    extra_admin = " + Panel Admin" if da_admin else ""
+    return True, f"¡{nombre_plan} activado{extra_admin}! Vigencia: {expira}"
 
-def actualizar_acceso_manual(email: str, activar: bool, dias: int = 30):
+def actualizar_acceso_manual(email: str, plan_tipo: str, dias: int = 30):
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
-    if activar:
-        expira = "ILIMITADO" if dias == 0 else (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
-        c.execute("UPDATE usuarios SET plan_activo = 1, plan_expira = ? WHERE email = ?", (expira, email))
+    if plan_tipo == "FREE":
+        c.execute("UPDATE usuarios SET plan_activo = 0, plan_tipo = 'FREE', plan_expira = NULL WHERE email = ?", (email,))
     else:
-        c.execute("UPDATE usuarios SET plan_activo = 0, plan_expira = NULL WHERE email = ?", (email,))
+        expira = "ILIMITADO" if dias == 0 else (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
+        c.execute("UPDATE usuarios SET plan_activo = 1, plan_tipo = ?, plan_expira = ? WHERE email = ?", (plan_tipo, expira, email))
     conn.commit()
     conn.close()
 
@@ -445,7 +468,7 @@ def cambiar_rol_admin(email: str, hacer_admin: bool):
 def listar_keys():
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
-    c.execute("SELECT clave, dias, da_admin, usada_por, fecha_creacion, fecha_uso FROM license_keys ORDER BY fecha_creacion DESC")
+    c.execute("SELECT clave, dias, plan_tipo, da_admin, usada_por, fecha_creacion, fecha_uso FROM license_keys ORDER BY fecha_creacion DESC")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -453,7 +476,7 @@ def listar_keys():
 def listar_usuarios():
     conn = sqlite3.connect("usuarios.db")
     c = conn.cursor()
-    c.execute("SELECT email, plan_activo, plan_expira, es_admin FROM usuarios ORDER BY email ASC")
+    c.execute("SELECT email, plan_activo, plan_tipo, plan_expira, es_admin FROM usuarios ORDER BY email ASC")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -573,9 +596,11 @@ if not st.session_state["autenticado"]:
     st.stop()
 
 # ==============================================================================
-# ESTADO DEL USUARIO ACTUAL (FREE / PRO / ADMIN)
+# ESTADO DEL USUARIO ACTUAL (FREE / PRO / SUPER_PRO / ADMIN)
 # ==============================================================================
-es_pro, texto_plan = obtener_estado_plan(st.session_state["usuario"])
+nivel_plan, texto_plan = obtener_estado_plan(st.session_state["usuario"])
+es_pro = nivel_plan in ("PRO", "SUPER_PRO")
+es_super_pro = (nivel_plan == "SUPER_PRO")
 usuario_es_admin = es_admin(st.session_state["usuario"])
 
 # --- RUTAS Y ARCHIVOS SEPARADOS POR USUARIO ---
@@ -604,18 +629,11 @@ def guardar_json(path: Path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-global_config = cargar_json(GLOBAL_CONFIG_FILE, {})
 user_config = cargar_json(USER_CONFIG_FILE, {})
 proyectos = cargar_json(PROJECTS_FILE, [])
 
-def obtener_gemini_key() -> str:
-    key = global_config.get("api_key", "").strip()
-    if not key:
-        try:
-            key = st.secrets.get("GEMINI_API_KEY", "").strip()
-        except Exception:
-            key = ""
-    return key
+def obtener_gemini_key_usuario() -> str:
+    return user_config.get("api_key", "").strip()
 
 # --- COLORES Y LAYOUTS ---
 COLORES_SUBTITULOS = {
@@ -734,7 +752,7 @@ def buscar_momentos_ia(api_key: str, audio_path: str, instruccion_usuario: str, 
                     client.files.delete(name=audio_file.name)
                 except Exception:
                     pass
-                st.error(f"Error con Gemini (intenta de nuevo en unos segundos): {e}")
+                st.error(f"Error con Gemini (revisa tu API Key o intenta en unos segundos): {e}")
                 st.stop()
 
     try:
@@ -824,7 +842,6 @@ def buscar_tendencias_tiktok_ia(api_key: str, nicho: str, region: str, detalle_e
         )
         return response.text
     except Exception:
-        # Respaldo si la búsqueda en vivo falla temporalmente
         response = client.models.generate_content(
             model="gemini-3.8-flash",
             contents=prompt
@@ -1068,15 +1085,13 @@ def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
     return True
 
 # --- BARRA DE NAVEGACIÓN SUPERIOR SIEMPRE VISIBLE ---
-opciones_menu = [
-    "💬 Inicio (Chat IA)",
-    "✂️ Editor y Redes",
-    "📈 Tendencias TikTok",
-    "📁 Mis Proyectos",
-    "💎 Plan Pro / Key"
-]
+opciones_menu = ["💬 Inicio (Chat IA)", "✂️ Editor y Redes", "📈 Tendencias TikTok", "📁 Mis Proyectos"]
+
+# Solo mostrar "Planes / Key" si el usuario aún NO tiene Super Pro (y no es Admin)
+if not es_super_pro and not usuario_es_admin:
+    opciones_menu.append("💎 Planes / Key")
+
 if usuario_es_admin:
-    opciones_menu.append("⚙️ Ajustes y API Key")
     opciones_menu.append("👑 Panel Admin")
 
 if st.session_state["pagina_actual"] not in opciones_menu:
@@ -1099,22 +1114,41 @@ if nav_cols[-1].button("🚪 Salir", key="top_nav_logout", use_container_width=T
         del st.session_state[k]
     st.rerun()
 
-# --- BARRA LATERAL ---
+# --- BARRA LATERAL (CON GEMINI API KEY PROPIA DE CADA USUARIO) ---
 total_clips_creados = len(list(CLIPS_DIR.glob("*.mp4"))) + len(list(EDITED_DIR.glob("*.mp4")))
 
 with st.sidebar:
     st.markdown('<div class="brand-logo">⚡ Mi Clipper IA</div>', unsafe_allow_html=True)
     st.caption(f"👤 {st.session_state['usuario']}")
-    if es_pro:
-        st.success(f"💎 {texto_plan}")
+    if es_super_pro:
+        st.success(f"🚀 {texto_plan}")
+    elif es_pro:
+        st.info(f"💎 {texto_plan}")
     else:
         st.warning("🆓 Plan Free (con marca de agua)")
-        if st.button("🚀 Mejorar a Plan Pro", type="primary", use_container_width=True):
-            st.session_state["pagina_actual"] = "💎 Plan Pro / Key"
-            st.rerun()
 
     st.divider()
+    st.markdown("##### 🔑 Mi Gemini API Key")
+    mi_key_input = st.text_input(
+        "Pega tu API Key de Google AI Studio:",
+        value=user_config.get("api_key", ""),
+        type="password",
+        key="sidebar_gemini_key",
+        label_visibility="collapsed",
+        placeholder="Pega tu Gemini API Key..."
+    )
+    if st.button("💾 Guardar mi API Key", use_container_width=True):
+        user_config["api_key"] = mi_key_input.strip()
+        guardar_json(USER_CONFIG_FILE, user_config)
+        st.success("¡API Key guardada!")
+
+    if obtener_gemini_key_usuario():
+        st.caption("🟢 Tu Gemini IA está lista")
+    else:
+        st.caption("🟡 Ingresa tu Gemini API Key arriba para usar la IA")
+
     if proyectos:
+        st.divider()
         st.caption("PROYECTOS RECIENTES")
         for p in proyectos[:4]:
             if st.button(f"🎬 {p['nombre'][:22]}", key=f"side_p_{p['id']}", use_container_width=True):
@@ -1136,14 +1170,15 @@ if pagina == "💬 Inicio (Chat IA)":
     </div>
     """, unsafe_allow_html=True)
 
+    etiqueta_kpi_plan = "SUPER PRO" if es_super_pro else ("PRO" if es_pro else "FREE")
     k1, k2, k3, k4 = st.columns(4)
     k1.markdown(f'<div class="stat-card"><div class="stat-num">{total_clips_creados}</div><div class="stat-label">Clips Renderizados</div></div>', unsafe_allow_html=True)
     k2.markdown(f'<div class="stat-card"><div class="stat-num">{len(proyectos)}</div><div class="stat-label">Proyectos</div></div>', unsafe_allow_html=True)
-    k3.markdown(f'<div class="stat-card"><div class="stat-num">{"PRO" if es_pro else "FREE"}</div><div class="stat-label">Tu Plan Actual</div></div>', unsafe_allow_html=True)
+    k3.markdown(f'<div class="stat-card"><div class="stat-num">{etiqueta_kpi_plan}</div><div class="stat-label">Tu Plan Actual</div></div>', unsafe_allow_html=True)
     k4.markdown(f'<div class="stat-card"><div class="stat-num">{"FULL HD" if es_pro else "480p"}</div><div class="stat-label">Calidad Máxima</div></div>', unsafe_allow_html=True)
 
     if not es_pro:
-        st.info("🆓 Estás en **Plan Free**: tus clips se crearán con marca de agua pequeña (`Mi Clipper`) y opciones básicas. Activa el **Plan Pro** en **💎 Plan Pro / Key** para descargar en HD/Full HD sin marca de agua, editar subtítulos, publicar en TikTok/YouTube y usar el **Radar de Tendencias TikTok**.")
+        st.info("🆓 Estás en **Plan Free**: tus clips se crearán con marca de agua pequeña (`Mi Clipper`) y opciones básicas. Sube a **Plan Pro** o **Super Pro** en **💎 Planes / Key**.")
 
     st.write("")
 
@@ -1228,15 +1263,15 @@ if pagina == "💬 Inicio (Chat IA)":
                 placeholder="p. ej. los momentos más graciosos, cada consejo sobre dinero, o una fórmula clonada desde Tendencias TikTok…"
             )
 
-            max_clips = 10 if es_pro else 3
+            max_clips = 10 if es_super_pro else (6 if es_pro else 3)
             a1, a2 = st.columns(2)
-            num_clips = a1.slider(f"🎞️ Cantidad de clips ({'máx 10 Pro' if es_pro else 'máx 3 en Free'})", 1, max_clips, min(3, max_clips))
+            num_clips = a1.slider(f"🎞️ Cantidad de clips (máx {max_clips} en tu plan)", 1, max_clips, min(3, max_clips))
             duracion_obj = a2.selectbox("⏱️ Duración", ["15 a 30 segundos", "30 a 60 segundos", "60 a 90 segundos"], index=1)
 
             if st.button("🚀 Buscar momentos con IA", type="primary", use_container_width=True):
-                api_key = obtener_gemini_key()
+                api_key = obtener_gemini_key_usuario()
                 if not api_key:
-                    st.error("El administrador aún no ha configurado la API Key de Gemini.")
+                    st.error("Primero pega y guarda tu Gemini API Key en la barra lateral izquierda (🔑 Mi Gemini API Key).")
                 else:
                     with st.spinner("La IA está escuchando tu vídeo y detectando los mejores clips…"):
                         clips = buscar_momentos_ia(
@@ -1301,7 +1336,7 @@ if pagina == "💬 Inicio (Chat IA)":
                         usar_sub = False
                         color_ass = "&H00FFFFFF"
                         tamano_sub = 18
-                        st.caption("🔒 Recorte manual, reencuadre, subtítulos de colores/tamaño y descarga HD/Full HD sin marca de agua están disponibles solo en **Plan Pro**.")
+                        st.caption("🔒 Recorte manual, reencuadre, subtítulos de colores/tamaño y descarga HD/Full HD sin marca de agua están disponibles desde el **Plan Pro**.")
 
                 with col_render:
                     proj_id = st.session_state.get("proj_id", "local")
@@ -1343,7 +1378,7 @@ if pagina == "💬 Inicio (Chat IA)":
                             )
 
 # ==============================================================================
-# PÁGINA 2: EDITOR DE VIDEO + TÍTULOS IA + TIKTOK & YOUTUBE (SOLO PRO)
+# PÁGINA 2: EDITOR DE VIDEO + TÍTULOS IA + TIKTOK & YOUTUBE (PRO Y SUPER PRO)
 # ==============================================================================
 elif pagina == "✂️ Editor y Redes":
     st.markdown("""
@@ -1355,15 +1390,15 @@ elif pagina == "✂️ Editor y Redes":
 
     if not es_pro:
         with st.container(border=True):
-            st.warning("🔒 **Función exclusiva del Plan Pro**")
+            st.warning("🔒 **Función disponible desde el Plan Pro**")
             st.markdown("""
-            Con el **Plan Pro** desbloqueas:
+            Con **Plan Pro** o **Super Pro** desbloqueas:
             - ✂️ Editor avanzado (recortar, velocidad, brillo, contraste y gancho visual)
             - ✨ Generador automático de **5 Títulos Virales + Descripción + Hashtags con IA**
-            - 🚀 Publicación directa en **TikTok y YouTube** con el texto ya escrito
+            - 🚀 Publicación en **TikTok y YouTube** con el texto ya escrito
             """)
-            if st.button("💎 Activar Plan Pro ahora", type="primary"):
-                st.session_state["pagina_actual"] = "💎 Plan Pro / Key"
+            if st.button("💎 Ver Planes Pro / Super Pro", type="primary"):
+                st.session_state["pagina_actual"] = "💎 Planes / Key"
                 st.rerun()
         st.stop()
 
@@ -1397,9 +1432,9 @@ elif pagina == "✂️ Editor y Redes":
             contexto_extra = g2.text_input("Nota extra para la IA (opcional):", placeholder="Ej: Enfócate en el giro del final...")
 
             if st.button("✨ Analizar este clip con IA (Auto-Gancho + 5 Títulos)", type="primary", use_container_width=True):
-                api_key = obtener_gemini_key()
+                api_key = obtener_gemini_key_usuario()
                 if not api_key:
-                    st.error("El administrador aún no ha configurado la API Key de Gemini.")
+                    st.error("Primero guarda tu Gemini API Key en la barra lateral izquierda.")
                 else:
                     with st.spinner("La IA está escuchando tu clip para crear el Gancho visual y los Títulos..."):
                         res_ia = analizar_clip_para_redes_ia(api_key, video_elegido, tono_video, contexto_extra)
@@ -1493,7 +1528,7 @@ elif pagina == "✂️ Editor y Redes":
                             st.error(f"Error al subir vía API: {e}")
 
 # ==============================================================================
-# PÁGINA 3: RADAR DE TENDENCIAS TIKTOK + CLONADOR DE FÓRMULA VIRAL (SOLO PRO)
+# PÁGINA 3: RADAR DE TENDENCIAS TIKTOK + CLONADOR VIRAL (EXCLUSIVO SUPER PRO)
 # ==============================================================================
 elif pagina == "📈 Tendencias TikTok":
     st.markdown("""
@@ -1503,22 +1538,22 @@ elif pagina == "📈 Tendencias TikTok":
     </div>
     """, unsafe_allow_html=True)
 
-    if not es_pro:
+    if not es_super_pro:
         with st.container(border=True):
-            st.warning("🔒 **Función exclusiva del Plan Pro**")
+            st.warning("🔒 **Función exclusiva del Plan SUPER PRO**")
             st.markdown("""
-            Activa tu **Plan Pro** para desbloquear el **Radar de Tendencias TikTok**:
-            - 🔎 **Buscador de Tendencias en Vivo:** la IA busca en tiempo real qué temas, formatos y ganchos están explotando hoy en tu nicho y país.
+            Sube al **Plan Super Pro** para desbloquear:
+            - 🔎 **Buscador de Tendencias en Vivo (Gemini + Google Search):** qué temas, formatos y ganchos explotan HOY en tu nicho y país.
             - 🧬 **Clonador de Fórmula Viral:** pega el link de cualquier TikTok viral, extrae su gancho de 3 segundos, ritmo y CTA, y úsalo como molde en tus propios videos con un clic.
+            - 🎞️ Hasta **10 clips** por video.
             """)
-            if st.button("💎 Activar Plan Pro ahora", type="primary"):
-                st.session_state["pagina_actual"] = "💎 Plan Pro / Key"
+            if st.button("🚀 Subir a Plan Super Pro", type="primary"):
+                st.session_state["pagina_actual"] = "💎 Planes / Key"
                 st.rerun()
         st.stop()
 
     tab_vivo, tab_clonar = st.tabs(["🔎 Buscador de Tendencias en Vivo", "🧬 Clonador de Fórmula Viral"])
 
-    # --- SUB-PESTAÑA 1: BUSCADOR EN VIVO ---
     with tab_vivo:
         with st.container(border=True):
             st.markdown('<span class="step-pill">GEMINI + GOOGLE SEARCH EN VIVO</span>', unsafe_allow_html=True)
@@ -1535,9 +1570,9 @@ elif pagina == "📈 Tendencias TikTok":
             extra_trend = st.text_input("Tema específico (opcional):", placeholder="Ej: historias de terror cortas, reacciones de streamers, consejos de ahorro...")
 
             if st.button("📡 Escanear tendencias de hoy", type="primary", use_container_width=True):
-                api_key = obtener_gemini_key()
+                api_key = obtener_gemini_key_usuario()
                 if not api_key:
-                    st.error("El administrador aún no ha configurado la API Key de Gemini.")
+                    st.error("Primero guarda tu Gemini API Key en la barra lateral izquierda.")
                 else:
                     with st.spinner(f"Buscando tendencias reales de {nicho} en {region}..."):
                         resultado_trend = buscar_tendencias_tiktok_ia(api_key, nicho, region, extra_trend)
@@ -1547,7 +1582,6 @@ elif pagina == "📈 Tendencias TikTok":
             with st.container(border=True):
                 st.markdown(st.session_state["resultado_tendencias"])
 
-    # --- SUB-PESTAÑA 2: CLONADOR DE FÓRMULA VIRAL ---
     with tab_clonar:
         with st.container(border=True):
             st.markdown('<span class="step-pill">INGENIERÍA INVERSA VIRAL</span>', unsafe_allow_html=True)
@@ -1555,9 +1589,9 @@ elif pagina == "📈 Tendencias TikTok":
             url_tk = st.text_input("🔗 Pega el link del TikTok viral aquí:", placeholder="https://www.tiktok.com/@usuario/video/...")
 
             if st.button("🧬 Analizar y extraer fórmula viral", type="primary", use_container_width=True):
-                api_key = obtener_gemini_key()
+                api_key = obtener_gemini_key_usuario()
                 if not api_key:
-                    st.error("El administrador aún no ha configurado la API Key de Gemini.")
+                    st.error("Primero guarda tu Gemini API Key en la barra lateral izquierda.")
                 elif not url_tk.strip():
                     st.warning("Pega un enlace de TikTok primero.")
                 else:
@@ -1619,133 +1653,125 @@ elif pagina == "📁 Mis Proyectos":
                     st.rerun()
 
 # ==============================================================================
-# PÁGINA 5: PLAN PRO / ACTIVAR KEY (YAPE + CANJE)
+# PÁGINA 5: PLANES (PRO Y SUPER PRO) + YAPE + CANJE DE KEY
 # ==============================================================================
-elif pagina == "💎 Plan Pro / Key":
-    _, col_pay, _ = st.columns([0.4, 2.4, 0.4])
-    with col_pay:
-        with st.container(border=True):
-            st.markdown('<span class="step-pill">ÚLTIMO PASO</span>', unsafe_allow_html=True)
-            st.markdown('<div class="hero-title" style="text-align:left; font-size:2.2rem;">Consigue los clips de tu vídeo</div>', unsafe_allow_html=True)
-            st.write("")
-
-            st.markdown("""
-            <div class="benefit-item">✅ Los mejores momentos de todo tu vídeo, encontrados y ordenados</div>
-            <div class="benefit-item">✅ Descarga en HD y Full HD sin marca de agua</div>
-            <div class="benefit-item">✅ Cambia cualquier clip: recórtalo, reencuádralo, cambia los subtítulos (colores y tamaño)</div>
-            <div class="benefit-item">✅ Publica en TikTok y YouTube desde Mi Clipper IA Studio, con el texto escrito por IA</div>
-            <div class="benefit-item">✅ <b>Radar de Tendencias de TikTok en vivo + Clonador de Fórmula Viral con IA</b></div>
-            """, unsafe_allow_html=True)
-
-            st.write("")
-            es_anual = st.toggle("Descuento anual (61%)", value=True, key="toggle_descuento_anual")
-
-            if es_anual:
-                st.markdown("""
-                <div class="price-box">
-                    <div style="font-size:1.05rem; font-weight:700; color:#e2e8f0;">Clips / Anual</div>
-                    <div style="margin-top:0.5rem;">
-                        <span style="text-decoration:line-through; color:#94a3b8; font-size:1.1rem;">$227.88</span>
-                        <span style="font-size:2rem; font-weight:800; color:#ffffff; margin-left:8px;">$7.50</span>
-                        <span style="color:#cbd5e1;">/mes</span>
-                        <span class="discount-pill">61% de descuento</span>
-                    </div>
-                    <div style="color:#94a3b8; font-size:0.88rem; margin-top:0.3rem;">Facturación anual · $89.99/año</div>
-                </div>
-                """, unsafe_allow_html=True)
-                plan_texto_wa = "Plan Anual ($89.99/año)"
-            else:
-                st.markdown("""
-                <div class="price-box">
-                    <div style="font-size:1.05rem; font-weight:700; color:#e2e8f0;">Clips / Mensual</div>
-                    <div style="margin-top:0.5rem;">
-                        <span style="font-size:2rem; font-weight:800; color:#ffffff;">$19.00</span>
-                        <span style="color:#cbd5e1;">/mes</span>
-                    </div>
-                    <div style="color:#94a3b8; font-size:0.88rem; margin-top:0.3rem;">Facturación mensual · Cancela cuando quieras</div>
-                </div>
-                """, unsafe_allow_html=True)
-                plan_texto_wa = "Plan Mensual ($19.00/mes)"
-
-            col_yape, col_key = st.columns(2)
-
-            with col_yape:
-                st.markdown(f"""
-                <div class="yape-card">
-                    <div style="font-size:0.85rem; color:#e9d5ff; font-weight:700;">PAGA CON YAPE</div>
-                    <div style="font-size:1.55rem; font-weight:800; color:#ffffff; margin:0.4rem 0;">{YAPE_NUMERO}</div>
-                    <div style="font-size:0.85rem; color:#cbd5e1;">Realiza tu Yape y envíanos la captura por WhatsApp para entregarte tu Key de acceso al instante.</div>
-                </div>
-                """, unsafe_allow_html=True)
-                st.write("")
-                msg_wa = urllib.parse.quote(
-                    f"Hola! Acabo de yapear para activar mi {plan_texto_wa} en Mi Clipper IA Studio. Mi correo registrado es: {st.session_state['usuario']}"
-                )
-                st.link_button(
-                    "📲 Enviar captura de Yape por WhatsApp",
-                    f"https://wa.me/{YAPE_WHATSAPP}?text={msg_wa}",
-                    use_container_width=True
-                )
-
-            with col_key:
-                st.markdown("#### 🔑 ¿Ya tienes tu Key?")
-                st.caption("Ingresa la clave que te enviamos tras tu pago por Yape para activar tu Plan Pro:")
-                key_input = st.text_input("Key de activación", placeholder="Ej: CLIP-A1B2-C3D4", key="input_canjear_key").strip().upper()
-                if st.button("🚀 Activar mi Plan", type="primary", use_container_width=True):
-                    if not key_input:
-                        st.warning("Escribe tu key primero.")
-                    else:
-                        ok, msg = canjear_key(st.session_state["usuario"], key_input)
-                        if ok:
-                            st.success(msg)
-                            time.sleep(1.2)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-
-# ==============================================================================
-# PÁGINA 6: AJUSTES Y API KEY (SOLO ADMINISTRADORES)
-# ==============================================================================
-elif pagina == "⚙️ Ajustes y API Key" and usuario_es_admin:
+elif pagina == "💎 Planes / Key":
     st.markdown("""
     <div class="hero-box">
-        <div class="hero-title">Ajustes Globales del Studio ⚙️</div>
-        <div class="hero-sub">Solo visible para Administradores. La API Key que guardes aquí servirá para todos tus usuarios.</div>
+        <div class="hero-title">Consigue los clips de tu vídeo ⚡</div>
+        <div class="hero-sub">Elige Plan Pro o Super Pro, paga con Yape y activa tu cuenta al instante con tu Key.</div>
     </div>
     """, unsafe_allow_html=True)
 
-    with st.container(border=True):
-        st.markdown("#### 🔑 Clave Global de Inteligencia Artificial (Gemini)")
-        nueva_key = st.text_input(
-            "Gemini API Key (Global para toda la plataforma)",
-            value=global_config.get("api_key", ""),
-            type="password",
-            placeholder="Pega aquí tu clave de Google AI Studio"
-        )
+    es_anual = st.toggle("Descuento anual (61%)", value=True, key="toggle_descuento_anual")
 
-        if st.button("💾 Guardar API Key Global", type="primary"):
-            global_config["api_key"] = nueva_key.strip()
-            guardar_json(GLOBAL_CONFIG_FILE, global_config)
-            st.success("¡API Key global guardada! Ya funciona para todos los usuarios.")
+    col_p1, col_p2 = st.columns(2)
 
+    with col_p1:
+        with st.container(border=True):
+            st.markdown('<span class="step-pill">💎 PLAN PRO</span>', unsafe_allow_html=True)
+            if es_anual:
+                st.markdown("""
+                <div class="price-box">
+                    <span style="text-decoration:line-through; color:#94a3b8;">$19.00</span>
+                    <span style="font-size:2rem; font-weight:800; color:#ffffff; margin-left:6px;">$7.50</span>
+                    <span style="color:#cbd5e1;">/mes</span>
+                    <span class="discount-pill">61% OFF</span>
+                    <div style="color:#94a3b8; font-size:0.85rem;">Facturación anual · $89.99/año</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="price-box">
+                    <span style="font-size:2rem; font-weight:800; color:#ffffff;">$19.00</span>
+                    <span style="color:#cbd5e1;">/mes</span>
+                    <div style="color:#94a3b8; font-size:0.85rem;">Facturación mensual</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown("""
+            <div class="benefit-item">✅ Hasta 6 clips por video encontrados y ordenados</div>
+            <div class="benefit-item">✅ Descarga en HD y Full HD sin marca de agua</div>
+            <div class="benefit-item">✅ Recorta, reencuadra y cambia subtítulos (colores y tamaño)</div>
+            <div class="benefit-item">✅ Publica en TikTok y YouTube con Títulos IA</div>
+            <div class="benefit-item" style="color:#64748b;">❌ Sin Radar de Tendencias TikTok ni Clonador Viral</div>
+            """, unsafe_allow_html=True)
+
+    with col_p2:
+        with st.container(border=True):
+            st.markdown('<span class="step-pill">🚀 PLAN SUPER PRO · RECOMENDADO</span>', unsafe_allow_html=True)
+            if es_anual:
+                st.markdown("""
+                <div class="super-box">
+                    <span style="text-decoration:line-through; color:#94a3b8;">$29.00</span>
+                    <span style="font-size:2rem; font-weight:800; color:#ffffff; margin-left:6px;">$11.50</span>
+                    <span style="color:#cbd5e1;">/mes</span>
+                    <span class="discount-pill">61% OFF</span>
+                    <div style="color:#94a3b8; font-size:0.85rem;">Facturación anual · $138.00/año</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="super-box">
+                    <span style="font-size:2rem; font-weight:800; color:#ffffff;">$29.00</span>
+                    <span style="color:#cbd5e1;">/mes</span>
+                    <div style="color:#94a3b8; font-size:0.85rem;">Facturación mensual</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown("""
+            <div class="benefit-item">✅ <b>Todo lo incluido en Plan Pro</b></div>
+            <div class="benefit-item">✅ Hasta <b>10 clips</b> por video en Full HD sin marca</div>
+            <div class="benefit-item">✅ <b>Buscador de Tendencias TikTok en Vivo</b> (Google Search + IA)</div>
+            <div class="benefit-item">✅ <b>Clonador de Fórmula Viral</b> (ingeniería inversa de TikToks)</div>
+            <div class="benefit-item">✅ Prioridad en nuevas funciones del Studio</div>
+            """, unsafe_allow_html=True)
+
+    st.write("")
     with st.container(border=True):
-        st.markdown("#### 🧹 Limpieza de archivos temporales")
-        if st.button("Vaciar mi carpeta workspace"):
-            for f in WORK_DIR.glob("*"):
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
-            st.success("Carpeta temporal limpiada.")
+        col_yape, col_key = st.columns(2)
+        with col_yape:
+            st.markdown(f"""
+            <div class="yape-card">
+                <div style="font-size:0.85rem; color:#e9d5ff; font-weight:700;">PAGA CON YAPE</div>
+                <div style="font-size:1.55rem; font-weight:800; color:#ffffff; margin:0.4rem 0;">{YAPE_NUMERO}</div>
+                <div style="font-size:0.85rem; color:#cbd5e1;">Yapea el monto de tu plan elegido y envíanos la captura por WhatsApp para recibir tu Key al instante.</div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.write("")
+            msg_wa = urllib.parse.quote(
+                f"Hola! Acabo de yapear para activar mi plan en Mi Clipper IA Studio. Mi correo registrado es: {st.session_state['usuario']}"
+            )
+            st.link_button(
+                "📲 Enviar captura de Yape por WhatsApp",
+                f"https://wa.me/{YAPE_WHATSAPP}?text={msg_wa}",
+                use_container_width=True
+            )
+
+        with col_key:
+            st.markdown("#### 🔑 ¿Ya tienes tu Key?")
+            st.caption("Ingresa la clave que te enviamos tras tu pago por Yape:")
+            key_input = st.text_input("Key de activación", placeholder="Ej: PRO-A1B2-C3D4 o SPRO-A1B2-C3D4", key="input_canjear_key").strip().upper()
+            if st.button("🚀 Activar mi Plan", type="primary", use_container_width=True):
+                if not key_input:
+                    st.warning("Escribe tu key primero.")
+                else:
+                    ok, msg = canjear_key(st.session_state["usuario"], key_input)
+                    if ok:
+                        st.success(msg)
+                        time.sleep(1.2)
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
 # ==============================================================================
-# PÁGINA 7: PANEL ADMIN (GENERAR KEYS CON O SIN ADMIN Y GESTIONAR USUARIOS)
+# PÁGINA 6: PANEL ADMIN (GENERAR KEYS PRO / SUPER PRO Y GESTIONAR USUARIOS)
 # ==============================================================================
 elif pagina == "👑 Panel Admin" and usuario_es_admin:
     st.markdown("""
     <div class="hero-box">
         <div class="hero-title">Panel de Administrador 👑</div>
-        <div class="hero-sub">Genera keys de activación para tus clientes de Yape y administra roles y accesos.</div>
+        <div class="hero-sub">Genera keys de Plan Pro o Super Pro para tus clientes de Yape y administra sus accesos.</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1754,23 +1780,24 @@ elif pagina == "👑 Panel Admin" and usuario_es_admin:
     with tab_keys:
         with st.container(border=True):
             st.markdown("#### ✨ Generar nueva Key de licencia")
-            col_d, col_adm, col_b = st.columns([2, 1.3, 1])
+            col_t, col_d, col_adm, col_b = st.columns([1.4, 1.5, 1.1, 1])
+            tipo_sel = col_t.selectbox("Tipo de Plan:", ["PRO", "SUPER_PRO"], format_func=lambda x: "💎 Plan Pro" if x == "PRO" else "🚀 Plan Super Pro")
             opciones_duracion = {
-                "Plan Mensual (30 días)": 30,
-                "Plan Trimestral (90 días)": 90,
-                "Plan Anual (365 días)": 365,
-                "Acceso Ilimitado (De por vida)": 0
+                "Mensual (30 días)": 30,
+                "Trimestral (90 días)": 90,
+                "Anual (365 días)": 365,
+                "Ilimitado (De por vida)": 0
             }
-            seleccion = col_d.selectbox("Duración del plan:", list(opciones_duracion.keys()))
+            seleccion = col_d.selectbox("Duración:", list(opciones_duracion.keys()))
             with col_adm:
                 st.write("")
                 st.write("")
-                incluir_admin = st.checkbox("👑 Dar Panel Admin", value=False)
+                incluir_admin = st.checkbox("👑 +Admin", value=False)
             with col_b:
                 st.write("")
                 st.write("")
                 if st.button("⚡ Generar Key", type="primary", use_container_width=True):
-                    nueva_clave = generar_nueva_key(opciones_duracion[seleccion], da_admin=incluir_admin)
+                    nueva_clave = generar_nueva_key(opciones_duracion[seleccion], plan_tipo=tipo_sel, da_admin=incluir_admin)
                     st.session_state["ultima_key_generada"] = nueva_clave
 
             if "ultima_key_generada" in st.session_state:
@@ -1783,13 +1810,14 @@ elif pagina == "👑 Panel Admin" and usuario_es_admin:
             if not keys:
                 st.info("Aún no has generado ninguna key.")
             else:
-                for clave, dias, da_adm, usada_por, f_crea, f_uso in keys:
+                for clave, dias, p_tipo, da_adm, usada_por, f_crea, f_uso in keys:
                     dur_txt = "Ilimitado" if dias == 0 else f"{dias} días"
+                    plan_badge = "🚀 **SUPER PRO**" if p_tipo == "SUPER_PRO" else "💎 **PRO**"
                     adm_badge = " · 👑 **+ADMIN**" if da_adm else ""
                     if usada_por:
-                        st.markdown(f"🔴 **`{clave}`** · `{dur_txt}`{adm_badge} · Usada por **{usada_por}** ({f_uso})")
+                        st.markdown(f"🔴 **`{clave}`** · {plan_badge} · `{dur_txt}`{adm_badge} · Usada por **{usada_por}** ({f_uso})")
                     else:
-                        st.markdown(f"🟢 **`{clave}`** · `{dur_txt}`{adm_badge} · **Disponible** _(creada {f_crea})_")
+                        st.markdown(f"🟢 **`{clave}`** · {plan_badge} · `{dur_txt}`{adm_badge} · **Disponible** _(creada {f_crea})_")
 
     with tab_users:
         with st.container(border=True):
@@ -1798,31 +1826,34 @@ elif pagina == "👑 Panel Admin" and usuario_es_admin:
             if not usuarios:
                 st.info("No hay usuarios registrados todavía.")
             else:
-                for email_u, activo_u, expira_u, es_adm_u in usuarios:
-                    c1, c2, c3, c4, c5 = st.columns([2.2, 1.4, 0.9, 0.9, 1.1])
+                for email_u, activo_u, tipo_u, expira_u, es_adm_u in usuarios:
+                    c1, c2, c3, c4, c5, c6 = st.columns([2.1, 1.4, 0.85, 0.95, 0.8, 0.95])
                     if es_admin_super(email_u):
                         estado = "👑 SUPER ADMIN"
                     elif es_adm_u:
-                        estado = f"👑 ADMIN ({expira_u or 'Pro'})"
+                        estado = f"👑 ADMIN ({tipo_u})"
                     elif activo_u:
-                        estado = f"🟢 Pro ({expira_u})"
+                        estado = f"🚀 Super Pro ({expira_u})" if tipo_u == "SUPER_PRO" else f"💎 Pro ({expira_u})"
                     else:
                         estado = "🆓 Free"
 
                     c1.markdown(f"**{email_u}**")
                     c2.markdown(estado)
                     if not es_admin_super(email_u):
-                        if c3.button("✅ +30d", key=f"act_{email_u}", use_container_width=True):
-                            actualizar_acceso_manual(email_u, True, 30)
+                        if c3.button("💎 Pro", key=f"pro_{email_u}", use_container_width=True):
+                            actualizar_acceso_manual(email_u, "PRO", 30)
                             st.rerun()
-                        if c4.button("🚫 Free", key=f"rev_{email_u}", use_container_width=True):
-                            actualizar_acceso_manual(email_u, False)
+                        if c4.button("🚀 S.Pro", key=f"spro_{email_u}", use_container_width=True):
+                            actualizar_acceso_manual(email_u, "SUPER_PRO", 30)
+                            st.rerun()
+                        if c5.button("🚫 Free", key=f"rev_{email_u}", use_container_width=True):
+                            actualizar_acceso_manual(email_u, "FREE")
                             st.rerun()
                         if es_adm_u:
-                            if c5.button("Quitar Admin", key=f"no_adm_{email_u}", use_container_width=True):
+                            if c6.button("Quitar 👑", key=f"no_adm_{email_u}", use_container_width=True):
                                 cambiar_rol_admin(email_u, False)
                                 st.rerun()
                         else:
-                            if c5.button("👑 Hacer Admin", key=f"si_adm_{email_u}", use_container_width=True):
+                            if c6.button("Dar 👑", key=f"si_adm_{email_u}", use_container_width=True):
                                 cambiar_rol_admin(email_u, True)
                                 st.rerun()
