@@ -37,10 +37,9 @@ st.markdown("""
         font-family: 'Plus Jakarta Sans', sans-serif !important;
     }
 
-    /* Ocultar botón Deploy, menú de tres puntos y barra superior */
-    #MainMenu {visibility: hidden !important;}
-    .stDeployButton {display: none !important;}
-    [data-testid="stToolbar"] {visibility: hidden !important;}
+    /* Ocultar SOLO botón Deploy y menú de tres puntos (sin tocar la barra lateral) */
+    #MainMenu, [data-testid="stMainMenu"] {display: none !important;}
+    .stDeployButton, [data-testid="stAppDeployButton"] {display: none !important;}
     [data-testid="stDecoration"] {display: none !important;}
     footer {visibility: hidden !important;}
     header[data-testid="stHeader"] {background: transparent !important;}
@@ -272,7 +271,6 @@ def init_db():
             plan_expira TEXT
         )
     """)
-    # Migración segura si la tabla ya existía sin columnas de plan
     for col_def in ("plan_activo INTEGER DEFAULT 0", "plan_expira TEXT"):
         try:
             c.execute(f"ALTER TABLE usuarios ADD COLUMN {col_def}")
@@ -334,7 +332,6 @@ def verificar_login(email: str, password: str) -> bool:
     return valido
 
 def obtener_estado_plan(email: str):
-    """Retorna (tiene_acceso: bool, texto_expiracion: str)"""
     if es_admin(email):
         return True, "ADMIN (Ilimitado)"
     conn = sqlite3.connect("usuarios.db")
