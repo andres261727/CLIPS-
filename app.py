@@ -37,12 +37,19 @@ st.markdown("""
         font-family: 'Plus Jakarta Sans', sans-serif !important;
     }
 
-    /* Ocultar SOLO botón Deploy y menú de tres puntos (sin tocar la barra lateral) */
+    /* Ocultar SOLO botón Deploy y menú de tres puntos */
     #MainMenu, [data-testid="stMainMenu"] {display: none !important;}
     .stDeployButton, [data-testid="stAppDeployButton"] {display: none !important;}
     [data-testid="stDecoration"] {display: none !important;}
     footer {visibility: hidden !important;}
     header[data-testid="stHeader"] {background: transparent !important;}
+
+    /* Asegurar que el botón para abrir la barra lateral sea siempre visible */
+    [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"] {
+        display: flex !important;
+        visibility: visible !important;
+        color: #ffffff !important;
+    }
 
     /* Fondo dinámico con malla de luces neón */
     .stApp {
@@ -468,6 +475,8 @@ if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
 if "usuario" not in st.session_state:
     st.session_state["usuario"] = None
+if "pagina_actual" not in st.session_state:
+    st.session_state["pagina_actual"] = "💬 Inicio (Chat IA)"
 
 # ==============================================================================
 # PANTALLA 1: LOGIN / REGISTRO CON GMAIL
@@ -542,14 +551,12 @@ if not st.session_state["autenticado"]:
 tiene_plan, texto_plan = obtener_estado_plan(st.session_state["usuario"])
 
 if not tiene_plan:
-    with st.sidebar:
-        st.markdown('<div class="brand-logo">⚡ Mi Clipper IA</div>', unsafe_allow_html=True)
-        st.caption(f"👤 {st.session_state['usuario']}")
-        st.warning("🔒 Plan: Sin activar")
-        if st.button("🚪 Cerrar sesión", use_container_width=True):
-            for k in list(st.session_state.keys()):
-                del st.session_state[k]
-            st.rerun()
+    top_u1, top_u2 = st.columns([4, 1])
+    top_u1.caption(f"👤 {st.session_state['usuario']} · 🔒 Plan sin activar")
+    if top_u2.button("🚪 Cerrar sesión", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 
     _, col_pay, _ = st.columns([0.5, 2.2, 0.5])
     with col_pay:
@@ -1041,8 +1048,32 @@ def subir_video_tiktok_api(access_token: str, video_path: str, titulo: str):
             raise Exception(f"Error al subir archivo a TikTok (HTTP {put_resp.status})")
     return True
 
-# --- BARRA LATERAL ---
+# --- BARRA DE NAVEGACIÓN SUPERIOR SIEMPRE VISIBLE ---
+opciones_menu = ["💬 Inicio (Chat IA)", "✂️ Editor y TikTok", "📁 Mis Proyectos", "⚙️ Ajustes y API Key"]
+if es_admin(st.session_state["usuario"]):
+    opciones_menu.append("👑 Panel Admin")
 
+if st.session_state["pagina_actual"] not in opciones_menu:
+    st.session_state["pagina_actual"] = opciones_menu[0]
+
+nav_cols = st.columns(len(opciones_menu) + 1)
+for idx, op in enumerate(opciones_menu):
+    es_activa = (st.session_state["pagina_actual"] == op)
+    if nav_cols[idx].button(
+        op,
+        key=f"top_nav_{idx}",
+        type="primary" if es_activa else "secondary",
+        use_container_width=True
+    ):
+        st.session_state["pagina_actual"] = op
+        st.rerun()
+
+if nav_cols[-1].button("🚪 Salir", key="top_nav_logout", use_container_width=True):
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    st.rerun()
+
+# --- BARRA LATERAL ---
 total_clips_creados = len(list(CLIPS_DIR.glob("*.mp4"))) + len(list(EDITED_DIR.glob("*.mp4")))
 
 with st.sidebar:
@@ -1050,23 +1081,8 @@ with st.sidebar:
     st.caption(f"Studio Pro · v{VERSION_ACTUAL}")
     st.caption(f"👤 {st.session_state['usuario']}")
     st.caption(f"💎 Plan: {texto_plan}")
-    if st.button("🚪 Cerrar sesión", use_container_width=True):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.rerun()
     st.divider()
 
-    opciones_menu = ["💬 Inicio (Chat IA)", "✂️ Editor y TikTok", "📁 Mis Proyectos", "⚙️ Ajustes y API Key"]
-    if es_admin(st.session_state["usuario"]):
-        opciones_menu.append("👑 Panel Admin")
-
-    pagina = st.radio(
-        "Navegación",
-        opciones_menu,
-        label_visibility="collapsed"
-    )
-
-    st.divider()
     if config.get("api_key"):
         st.success("🟢 Gemini IA conectada")
     else:
@@ -1092,7 +1108,10 @@ with st.sidebar:
             if st.button(f"🎬 {p['nombre'][:22]}", key=f"side_p_{p['id']}", use_container_width=True):
                 st.session_state["proyecto_activo"] = p
                 st.session_state["ir_a_resultados"] = True
+                st.session_state["pagina_actual"] = "💬 Inicio (Chat IA)"
                 st.rerun()
+
+pagina = st.session_state["pagina_actual"]
 
 # ==============================================================================
 # PÁGINA 1: INICIO / CHAT IA
@@ -1452,6 +1471,7 @@ elif pagina == "📁 Mis Proyectos":
                 if c2.button("Abrir", type="primary", key=f"open_{p['id']}", use_container_width=True):
                     st.session_state["proyecto_activo"] = p
                     st.session_state["ir_a_resultados"] = True
+                    st.session_state["pagina_actual"] = "💬 Inicio (Chat IA)"
                     st.rerun()
                 if c3.button("🗑️ Borrar", key=f"del_{p['id']}", use_container_width=True):
                     proyectos = [x for x in proyectos if x["id"] != p["id"]]
